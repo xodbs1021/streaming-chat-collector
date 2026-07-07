@@ -613,8 +613,22 @@ async function connectProvider(request: ConnectProviderRequest) {
   const callbacks = {
     onMessage: (message: Parameters<typeof state.addMessage>[0]) => state.addMessage(message),
     onStatus: (status: Parameters<typeof state.setStatus>[0]) => {
+      // 연결된 상태에서 offline으로 바뀌면 방송이 끝난 것 — 접속 시점의 "채널을 못 찾음" offline과
+      // 구분하기 위해 "이전에 connected/reconnecting이었는가"를 기준으로 삼는다.
+      const previousState = state.getStatus(status.provider).state;
+      const wasActive = previousState === "connected" || previousState === "reconnecting";
       state.setStatus(status);
       appendStatusLog(status);
+      if (status.state === "offline" && wasActive) {
+        appendProviderLog({
+          provider: status.provider,
+          sourceMode: status.sourceMode,
+          level: "info",
+          channelId: status.channelId,
+          message: "방송 종료가 감지되어 연결을 자동으로 해제합니다."
+        });
+        void disconnectProvider(status.provider);
+      }
     },
     onViewerCount: (provider: ChatProvider, count: number) => {
       liveAnalytics.addViewerSample(provider, count);

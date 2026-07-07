@@ -363,7 +363,16 @@ export class SoopUnofficialAdapter implements ProviderAdapter {
     }
     const poll = () => {
       void fetchSoopViewerCount(bjId)
-        .then((count) => this.reportViewerCount(count))
+        .then((result) => {
+          if (!result) {
+            return;
+          }
+          this.reportViewerCount(result.count);
+          // 방송 종료(station API의 broad=null) 감지 — 실제 연결 해제는 index.ts가 처리한다.
+          if (!result.live && !this.stopped) {
+            this.setStatus("offline", "방송이 종료되어 채팅 연결을 해제합니다.");
+          }
+        })
         .catch(() => undefined);
     };
     poll();
@@ -444,7 +453,13 @@ export class SoopUnofficialAdapter implements ProviderAdapter {
   }
 }
 
-export async function fetchSoopViewerCount(bjId: string): Promise<number | undefined> {
+export interface SoopLiveStatusResult {
+  count?: number;
+  /** false면 station API의 broad가 null — 방송이 종료된 것으로 판단 */
+  live: boolean;
+}
+
+export async function fetchSoopViewerCount(bjId: string): Promise<SoopLiveStatusResult | undefined> {
   for (const origin of STATION_API_ORIGINS) {
     try {
       const response = await fetch(`${origin}/api/${encodeURIComponent(bjId)}/station`, {
@@ -459,9 +474,10 @@ export async function fetchSoopViewerCount(bjId: string): Promise<number | undef
       }
       const json = (await response.json()) as { broad?: { current_sum_viewer?: number | string } | null };
       const count = Number(json.broad?.current_sum_viewer);
-      if (Number.isFinite(count) && count >= 0) {
-        return count;
-      }
+      return {
+        count: Number.isFinite(count) && count >= 0 ? count : undefined,
+        live: json.broad != null
+      };
     } catch {
       // 다음 origin으로 폴백
     }
