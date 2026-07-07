@@ -265,7 +265,17 @@ export class ChzzkUnofficialAdapter implements ProviderAdapter {
     this.stopViewerPolling();
     this.viewerTimer = setInterval(() => {
       void fetchChzzkViewerCount(channelId)
-        .then((count) => this.reportViewerCount(count))
+        .then((result) => {
+          if (!result) {
+            return;
+          }
+          this.reportViewerCount(result.count);
+          // 방송 종료(status=CLOSE) 감지 — 채팅 소켓은 종료돼도 자동으로 안 끊기므로 직접 상태를 넘긴다.
+          // 실제 연결 해제(소켓 정리, 프레임 캡처 중단, 녹화 세션 종료)는 index.ts가 이 상태 전환을 보고 처리한다.
+          if (!result.live && !this.stopped) {
+            this.setStatus("offline", "방송이 종료되어 채팅 연결을 해제합니다.");
+          }
+        })
         .catch(() => undefined);
     }, VIEWER_POLL_INTERVAL_MS);
   }
@@ -315,7 +325,13 @@ export class ChzzkUnofficialAdapter implements ProviderAdapter {
   }
 }
 
-export async function fetchChzzkViewerCount(channelId: string): Promise<number | undefined> {
+export interface ChzzkLiveStatusResult {
+  count?: number;
+  /** false면 status가 "CLOSE" — 방송이 종료된 것으로 판단 */
+  live: boolean;
+}
+
+export async function fetchChzzkViewerCount(channelId: string): Promise<ChzzkLiveStatusResult | undefined> {
   const response = await fetch(
     `https://api.chzzk.naver.com/polling/v2/channels/${encodeURIComponent(channelId)}/live-status`,
     {
@@ -332,7 +348,11 @@ export async function fetchChzzkViewerCount(channelId: string): Promise<number |
   }
   const json = (await response.json()) as LiveDetailResponse;
   const count = json.content?.concurrentUserCount;
-  return typeof count === "number" && Number.isFinite(count) && count >= 0 ? count : undefined;
+  return {
+    count: typeof count === "number" && Number.isFinite(count) && count >= 0 ? count : undefined,
+    // status 필드가 없는 응답도 있어(구버전/캐시), 그런 경우는 CLOSE로 단정하지 않고 계속 라이브로 간주
+    live: json.content?.status !== "CLOSE"
+  };
 }
 
 function parsePacket(data: string): NaverChatPacket | undefined {

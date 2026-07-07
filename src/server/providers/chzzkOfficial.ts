@@ -257,13 +257,19 @@ export class ChzzkOfficialAdapter implements ProviderAdapter {
         return;
       }
       void fetchChzzkViewerCount(channelId)
-        .then((count) => {
-          if (typeof count !== "number") {
+        .then((result) => {
+          if (!result) {
             return;
           }
-          this.status = { ...this.status, viewerCount: count };
-          this.callbacks.onViewerCount?.("chzzk", count);
-          this.callbacks.onStatus(this.status);
+          if (typeof result.count === "number") {
+            this.status = { ...this.status, viewerCount: result.count };
+            this.callbacks.onViewerCount?.("chzzk", result.count);
+            this.callbacks.onStatus(this.status);
+          }
+          // 방송 종료 감지 — 실제 연결 해제는 index.ts가 이 상태 전환을 보고 처리한다.
+          if (!result.live) {
+            this.setStatus("offline", "방송이 종료되어 채팅 연결을 해제합니다.");
+          }
         })
         .catch(() => undefined);
     }, 10_000);
