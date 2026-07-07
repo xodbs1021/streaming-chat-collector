@@ -20,7 +20,7 @@ import { parseChzzkTokenResponse } from "./providers/chzzkToken";
 import type { ChzzkTokenSet, ProviderAdapter } from "./providers/types";
 import { SoopUnofficialAdapter } from "./providers/soopUnofficial";
 import { classifyProviderFailureReason } from "./providerDiagnostics";
-import { FrameCaptureManager } from "./frameCapture";
+import { FrameCaptureManager, fetchChzzkHlsUrl, fetchSoopHlsUrl } from "./frameCapture";
 import { ChatRecorder } from "./recorder";
 import { AppState, type AppSocketServer } from "./state";
 import type {
@@ -46,11 +46,18 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(app.server, {
 const recorder = new ChatRecorder(path.resolve(process.cwd(), config.chatDataDir));
 const frameCapture = new FrameCaptureManager(
   path.resolve(process.cwd(), config.chatDataDir, "frames", "chzzk"),
+  fetchChzzkHlsUrl,
   (level, message) => appendProviderLog({ provider: "chzzk", level, message })
 );
+const frameCaptureSoop = new FrameCaptureManager(
+  path.resolve(process.cwd(), config.chatDataDir, "frames", "soop"),
+  fetchSoopHlsUrl,
+  (level, message) => appendProviderLog({ provider: "soop", level, message })
+);
+const frameCaptureManagers = { chzzk: frameCapture, soop: frameCaptureSoop } as const;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    void frameCapture.stop().finally(() => process.exit(0));
+    void Promise.all([frameCapture.stop(), frameCaptureSoop.stop()]).finally(() => process.exit(0));
   });
 }
 const liveAnalytics = new LiveAnalytics();
@@ -494,27 +501,48 @@ app.post("/api/providers/soop/disconnect", async () => {
   return { ok: true, providerStatus: state.getStatus("soop"), providerStatuses: state.getStatuses() };
 });
 
-app.get("/api/frames/chzzk/status", async () => frameCapture.getDebugState());
+function frameManagerFor(provider: string): FrameCaptureManager | undefined {
+  return provider === "chzzk" || provider === "soop" ? frameCaptureManagers[provider] : undefined;
+}
 
-app.get<{ Querystring: { from?: string; to?: string } }>("/api/frames/chzzk/index", async (request) => {
-  const from = readOptionalNumber(request.query.from) ?? 0;
-  const to = readOptionalNumber(request.query.to) ?? Number.MAX_SAFE_INTEGER;
-  return { seconds: frameCapture.listFrameSeconds(Math.floor(from), Math.floor(to)) };
+app.get<{ Params: { provider: string } }>("/api/frames/:provider/status", async (request, reply) => {
+  const manager = frameManagerFor(request.params.provider);
+  if (!manager) {
+    return reply.code(404).send({ error: "지원하지 않는 provider입니다." });
+  }
+  return manager.getDebugState();
 });
 
-app.get<{ Params: { second: string } }>("/api/frames/chzzk/:second", async (request, reply) => {
+app.get<{ Params: { provider: string }; Querystring: { from?: string; to?: string } }>(
+  "/api/frames/:provider/index",
+  async (request, reply) => {
+    const manager = frameManagerFor(request.params.provider);
+    if (!manager) {
+      return reply.code(404).send({ error: "지원하지 않는 provider입니다." });
+    }
+    const from = readOptionalNumber(request.query.from) ?? 0;
+    const to = readOptionalNumber(request.query.to) ?? Number.MAX_SAFE_INTEGER;
+    return { seconds: manager.listFrameSeconds(Math.floor(from), Math.floor(to)) };
+  }
+);
+
+app.get<{ Params: { provider: string; second: string } }>("/api/frames/:provider/:second", async (request, reply) => {
+  const manager = frameManagerFor(request.params.provider);
+  if (!manager) {
+    return reply.code(404).send({ error: "지원하지 않는 provider입니다." });
+  }
   const second = Number(request.params.second.replace(/\.jpg$/i, ""));
   if (!Number.isFinite(second)) {
     return reply.code(400).send({ error: "잘못된 시각입니다." });
   }
-  const match = frameCapture.nearestFrame(Math.floor(second));
+  const match = manager.nearestFrame(Math.floor(second));
   if (match === undefined) {
     return reply.code(404).send({ error: "해당 시각의 프레임이 없습니다." });
   }
   return reply
     .type("image/jpeg")
     .header("Cache-Control", "public, max-age=86400")
-    .send(createReadStream(frameCapture.framePath(match)));
+    .send(createReadStream(manager.framePath(match)));
 });
 
 // SPA 폴백 — 정적 파일과 겹치지 않는 경로(관리 화면 등 클라이언트 라우트)만 여기로 들어온다.
@@ -648,6 +676,9 @@ async function connectProvider(request: ConnectProviderRequest) {
       if (request.provider === "chzzk") {
         const frameChannelId = adapter.getStatus().channelId ?? request.channelId ?? config.defaultChannelId ?? "";
         void frameCapture.start(frameChannelId).catch(() => undefined);
+      } else if (request.provider === "soop") {
+        const frameChannelId = adapter.getStatus().channelId ?? request.channelId ?? config.soopDefaultChannelId ?? "";
+        void frameCaptureSoop.start(frameChannelId).catch(() => undefined);
       }
     }
     return { ok: !isFailureState, providerStatus: adapter.getStatus(), providerStatuses: state.getStatuses() };
@@ -687,6 +718,8 @@ async function disconnectProvider(
   }
   if (provider === "chzzk") {
     await frameCapture.stop();
+  } else if (provider === "soop") {
+    await frameCaptureSoop.stop();
   }
   const endedSession = await recorder.endSession(provider);
   if (endedSession) {

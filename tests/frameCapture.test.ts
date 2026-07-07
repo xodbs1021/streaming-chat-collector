@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractHlsUrl, nearestFrameSecond } from "../src/server/frameCapture";
+import { extractHlsUrl, findHlsUrlDeep, nearestFrameSecond } from "../src/server/frameCapture";
 
 describe("frame capture helpers", () => {
   it("extracts the HLS media path from livePlaybackJson", () => {
@@ -17,6 +17,18 @@ describe("frame capture helpers", () => {
     expect(extractHlsUrl(JSON.stringify({ media: [] }))).toBeUndefined();
     expect(extractHlsUrl(JSON.stringify({ media: [{ mediaId: "DASH", path: "x" }] }))).toBeUndefined();
     expect(extractHlsUrl("not-json")).toBeUndefined();
+  });
+
+  it("finds an m3u8 URL nested anywhere in a JSON tree", () => {
+    const response = { CHANNEL: { RESULT: 1, VIEWPRESET: [{ label: "HD", view_url: "https://cdn.example.com/live/index.m3u8?token=abc" }] } };
+    expect(findHlsUrlDeep(response)).toBe("https://cdn.example.com/live/index.m3u8?token=abc");
+  });
+
+  it("returns undefined when no m3u8 URL is present", () => {
+    expect(findHlsUrlDeep({ CHANNEL: { RESULT: 0 } })).toBeUndefined();
+    expect(findHlsUrlDeep({ url: "https://example.com/not-hls.mp4" })).toBeUndefined();
+    expect(findHlsUrlDeep(null)).toBeUndefined();
+    expect(findHlsUrlDeep("just a string")).toBeUndefined();
   });
 
   it("finds the nearest frame at or before the target within tolerance", () => {
