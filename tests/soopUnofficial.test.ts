@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { buildEndpoints, deriveChatHosts, parseSoopChannelInput } from "../src/server/providers/soopUnofficial";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildEndpoints, deriveChatHosts, fetchSoopViewerCount, parseSoopChannelInput } from "../src/server/providers/soopUnofficial";
 
 describe("soop unofficial adapter input parsing", () => {
   it("accepts plain BJ ids", () => {
@@ -67,5 +67,26 @@ describe("soop unofficial adapter input parsing", () => {
       "chat-76DBFCD3.sooplive.com",
       "118.219.252.211"
     ]);
+  });
+});
+
+describe("fetchSoopViewerCount", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reports live=true and the viewer count while broadcasting", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ broad: { current_sum_viewer: 7 } }) }));
+    await expect(fetchSoopViewerCount("phonics1")).resolves.toEqual({ count: 7, live: true });
+  });
+
+  it("reports live=false when the station API's broad is null", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ broad: null }) }));
+    await expect(fetchSoopViewerCount("phonics1")).resolves.toEqual({ count: undefined, live: false });
+  });
+
+  it("returns undefined when every origin fails", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+    await expect(fetchSoopViewerCount("phonics1")).resolves.toBeUndefined();
   });
 });
