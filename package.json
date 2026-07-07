@@ -12,8 +12,10 @@
     "preview": "pnpm build && pnpm start",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "knip": "knip"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",
@@ -42,7 +44,9 @@
     "jsdom": "^26.1.0",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "@vitest/coverage-v8": "^3.2.4",
+    "knip": "^5.64.4"
   },
   "engines": {
     "node": ">=20"

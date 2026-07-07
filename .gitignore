@@ -4,5 +4,6 @@ dist-server/
 data/
 test-results/
 playwright-report/
+coverage/
 .env
 .DS_Store
