@@ -1978,6 +1978,52 @@ time {
   gap: 10px;
 }
 
+.frame-player-provider-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(56px, 1fr));
+  gap: 4px;
+  margin-left: auto;
+  padding: 3px;
+  border: 1px solid rgba(226, 255, 240, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.frame-player-provider-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #b7d5c7;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.frame-player-provider-tabs button.active {
+  background: rgba(64, 232, 147, 0.2);
+  color: #f5fff8;
+  box-shadow: inset 0 0 0 1px rgba(87, 255, 173, 0.38);
+}
+
+:root[data-theme="light"] .frame-player-provider-tabs {
+  border-color: rgba(18, 56, 38, 0.16);
+  background: rgba(18, 56, 38, 0.04);
+}
+
+:root[data-theme="light"] .frame-player-provider-tabs button {
+  color: #3c5c4d;
+}
+
+:root[data-theme="light"] .frame-player-provider-tabs button.active {
+  background: rgba(64, 232, 147, 0.22);
+  color: #123826;
+}
+
 .frame-preview-large {
   display: block;
   width: 100%;

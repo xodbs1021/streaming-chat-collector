@@ -5,6 +5,7 @@ import type {
   AnalyticsRankItem,
   AnalyticsSummary,
   AnalyticsWindow,
+  ChatProvider,
   ChatRecord,
   HighlightAnnotation,
   HighlightCandidate,
@@ -18,6 +19,8 @@ import type {
   TimelineMarker,
   WindowComparisonSummary
 } from "../../shared/types";
+import { fetchFrameSeconds } from "../frameIndexClient";
+import { dominantProvider, filterAvailableSeconds, otherProvider, resolveAvailableFrames, sumProviderCounts } from "../frameProviderSelection";
 import { socket } from "../socket";
 
 const WINDOW_OPTIONS = [1, 3, 5, 10];
@@ -37,6 +40,8 @@ const MARKER_PRESETS = ["밴픽", "게임", "휴식", "광고", MARKER_END_LABEL
 // 캡처가 1fps라 프레임 자체가 최대 1초 간격 — 300ms면 5장이 1.5초에 한 바퀴 돌아
 // "영상처럼 움직이는" 느낌을 주면서도 각 프레임이 눈에 들어오는 균형점
 const FRAME_PLAYBACK_INTERVAL_MS = 300;
+// 서버의 프레임 인덱스 재스캔 주기(frameCapture.ts)와 맞춰, 그보다 빨리 폴링해도 의미가 없다
+const FRAME_INDEX_REFRESH_MS = 5_000;
 const MARKER_COLORS: Record<string, string> = {
   밴픽: "rgba(143, 198, 255, 0.24)",
   게임: "rgba(49, 232, 149, 0.2)",
@@ -136,9 +141,12 @@ export function DashboardRoute() {
   const [markersSessionId, setMarkersSessionId] = useState<string | undefined>();
   const [canSaveMarkers, setCanSaveMarkers] = useState(false);
   const [markerLabelInput, setMarkerLabelInput] = useState("");
+  const [frameSecondsByProvider, setFrameSecondsByProvider] = useState<Partial<Record<ChatProvider, number[]>>>({});
+  const [frameIndexLoaded, setFrameIndexLoaded] = useState(false);
   const windowSecRef = useRef(windowSec);
   const selectedSessionIdRef = useRef(selectedSessionId);
   const lastSpikeWindowRef = useRef(0);
+  const summaryWindowsRef = useRef<AnalyticsWindow[]>([]);
 
   useEffect(() => {
     void loadSessions();
@@ -196,6 +204,33 @@ export function DashboardRoute() {
       socket.off("recording:status", onRecordingStatus);
       socket.off("analytics:live", onLiveAnalytics);
       socket.off("provider:statuses", onProviderStatuses);
+    };
+  }, []);
+
+  useEffect(() => {
+    // 5초마다 실제로 캡처된 프레임 초 목록을 가져온다 — 화면(호버/재생 패널)은 이 목록에
+    // 있는 초만 보여줘서, ffmpeg 재연결로 생긴 캡처 공백에서 이미지가 깜빡이지 않게 한다.
+    let cancelled = false;
+
+    async function refreshFrameIndex() {
+      const windows = summaryWindowsRef.current;
+      if (windows.length === 0) {
+        return;
+      }
+      const fromSec = windows[0].windowStart / 1000;
+      const toSec = windows[windows.length - 1].windowEnd / 1000;
+      const [chzzk, soop] = await Promise.all([fetchFrameSeconds("chzzk", fromSec, toSec), fetchFrameSeconds("soop", fromSec, toSec)]);
+      if (!cancelled) {
+        setFrameSecondsByProvider({ chzzk, soop });
+        setFrameIndexLoaded(true);
+      }
+    }
+
+    void refreshFrameIndex();
+    const intervalId = window.setInterval(() => void refreshFrameIndex(), FRAME_INDEX_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
     };
   }, []);
 
@@ -403,6 +438,7 @@ export function DashboardRoute() {
   }, [liveSummary, highlightSummary, selectedSessionId]);
 
   const summary = selectedSessionId === "live" ? liveSummary : sessionSummary ?? emptySummary;
+  summaryWindowsRef.current = summary.windows;
   const activeSessions = recordingStatus.activeSessions?.length
     ? recordingStatus.activeSessions
     : recordingStatus.activeSession
@@ -766,6 +802,8 @@ export function DashboardRoute() {
             </div>
             <Timeline
               focusRange={focusRange}
+              frameIndexLoaded={frameIndexLoaded}
+              frameSecondsByProvider={frameSecondsByProvider}
               markers={markers}
               participationRate={summary.participationRate}
               selection={selectedRange}
@@ -814,7 +852,14 @@ export function DashboardRoute() {
             )}
           </section>
 
-          {selectedRange && <FramePlayerPanel range={selectedRange} />}
+          {selectedRange && (
+            <FramePlayerPanel
+              frameIndexLoaded={frameIndexLoaded}
+              frameSecondsByProvider={frameSecondsByProvider}
+              range={selectedRange}
+              windows={summary.windows}
+            />
+          )}
 
           <HighlightMemoPanel
             onClearSelection={clearSelection}
@@ -1011,30 +1056,84 @@ function frameSecondsForWindow(window: AnalyticsWindow): number[] {
   return frameSecondsForRange(window.windowStart, window.windowEnd);
 }
 
-/** 해당 시각의 방송 프레임 — 서버에 프레임이 없으면(404) 조용히 숨김 */
-function FramePreview({ second, large }: { second: number; large?: boolean }) {
-  const [failedSecond, setFailedSecond] = useState<number | undefined>();
-  if (failedSecond === second) {
+const PROVIDER_LABEL: Record<ChatProvider, string> = { chzzk: "치지직", soop: "SOOP" };
+
+/**
+ * 해당 시각의 방송 프레임. provider에 캡처가 없으면(404) fallbackProvider로 한 번 더 시도하고,
+ * 그마저 없으면 조용히 숨긴다. provider/second가 바뀌면 부모가 key로 이 컴포넌트를 새로 마운트해서
+ * 재시도 상태를 리셋시킨다.
+ */
+function FramePreview({
+  second,
+  provider,
+  fallbackProvider,
+  large
+}: {
+  second: number;
+  provider: ChatProvider;
+  fallbackProvider?: ChatProvider;
+  large?: boolean;
+}) {
+  const [attempt, setAttempt] = useState<"primary" | "fallback" | "failed">("primary");
+  if (attempt === "failed") {
     return null;
   }
+  const activeProvider = attempt === "fallback" && fallbackProvider ? fallbackProvider : provider;
   return (
     <img
       alt=""
       className={large ? "frame-preview frame-preview-large" : "frame-preview"}
       loading="lazy"
-      onError={() => setFailedSecond(second)}
-      src={`/api/frames/chzzk/${second}.jpg`}
+      onError={() => setAttempt((current) => (current === "primary" && fallbackProvider ? "fallback" : "failed"))}
+      src={`/api/frames/${activeProvider}/${second}.jpg`}
     />
   );
 }
 
 /** 선택된 구간을 크게 자동재생 — 호버 미리보기와 별개로, 클릭해서 고른 구간을 명확히 확인하기 위한 패널 */
-function FramePlayerPanel({ range }: { range: TimelineSelection }) {
+function FramePlayerPanel({
+  range,
+  windows,
+  frameSecondsByProvider,
+  frameIndexLoaded
+}: {
+  range: TimelineSelection;
+  windows: AnalyticsWindow[];
+  frameSecondsByProvider: Partial<Record<ChatProvider, number[]>>;
+  frameIndexLoaded: boolean;
+}) {
   const [frameIndex, setFrameIndex] = useState(0);
-  const seconds = useMemo(() => frameSecondsForRange(range.startAt, range.endAt), [range.startAt, range.endAt]);
+  const [manualProvider, setManualProvider] = useState<ChatProvider | undefined>();
+  const candidateSeconds = useMemo(() => frameSecondsForRange(range.startAt, range.endAt), [range.startAt, range.endAt]);
+  const rangeWindows = useMemo(
+    () => windows.filter((window) => window.windowStart < range.endAt && window.windowEnd > range.startAt),
+    [windows, range.startAt, range.endAt]
+  );
+  const rangeCounts = useMemo(() => sumProviderCounts(rangeWindows), [rangeWindows]);
+  const dominant = dominantProvider(rangeCounts) ?? "chzzk";
+
+  // 실제 캡처된 프레임만 남긴다 — 인덱스를 아직 못 받았으면(초기 로드) 옛 방식(이론상 초 전부)으로 우선 표시.
+  // 사용자가 탭으로 플랫폼을 직접 골랐으면 그 선택을 그대로 존중하고(자동 폴백 없음), 안 골랐으면
+  // 채팅량이 더 많은 플랫폼을 우선 시도하되 실제 프레임이 없으면 반대쪽을 시도한다.
+  const resolved = useMemo(() => {
+    if (!frameIndexLoaded) {
+      return { provider: manualProvider ?? dominant, seconds: candidateSeconds };
+    }
+    if (manualProvider) {
+      return { provider: manualProvider, seconds: filterAvailableSeconds(candidateSeconds, frameSecondsByProvider[manualProvider] ?? []) };
+    }
+    return resolveAvailableFrames(candidateSeconds, frameSecondsByProvider, dominant, otherProvider(dominant));
+  }, [frameIndexLoaded, manualProvider, dominant, candidateSeconds, frameSecondsByProvider]);
+
+  const activeProvider = resolved.provider;
+  const seconds = resolved.seconds;
 
   useEffect(() => {
     setFrameIndex(0);
+    setManualProvider(undefined);
+  }, [range.startAt, range.endAt]);
+
+  useEffect(() => {
     if (seconds.length <= 1) {
       return undefined;
     }
@@ -1042,10 +1141,10 @@ function FramePlayerPanel({ range }: { range: TimelineSelection }) {
       setFrameIndex((current) => (current + 1) % seconds.length);
     }, FRAME_PLAYBACK_INTERVAL_MS);
     return () => window.clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range.startAt, range.endAt]);
+  }, [seconds]);
 
-  const second = seconds[frameIndex];
+  const activeIndex = seconds.length > 0 ? frameIndex % seconds.length : -1;
+  const second = activeIndex >= 0 ? seconds[activeIndex] : undefined;
 
   return (
     <section className="panel frame-player-panel">
@@ -1054,13 +1153,27 @@ function FramePlayerPanel({ range }: { range: TimelineSelection }) {
         <h2>
           선택 구간 재생 · {formatTime(range.startAt)} ~ {formatTime(range.endAt)}
         </h2>
+        <div className="frame-player-provider-tabs" role="tablist" aria-label="프레임 플랫폼">
+          {(["chzzk", "soop"] as const).map((provider) => (
+            <button
+              aria-selected={activeProvider === provider}
+              className={activeProvider === provider ? "active" : ""}
+              key={provider}
+              onClick={() => setManualProvider(provider)}
+              role="tab"
+              type="button"
+            >
+              {PROVIDER_LABEL[provider]}
+            </button>
+          ))}
+        </div>
       </div>
       {second !== undefined ? (
         <>
-          <FramePreview large second={second} />
+          <FramePreview key={`${activeProvider}-${second}`} large provider={activeProvider} second={second} />
           <div className="frame-player-scrubber">
             {seconds.map((s, index) => (
-              <span className={index === frameIndex ? "active" : ""} key={s} />
+              <span className={index === activeIndex ? "active" : ""} key={s} />
             ))}
           </div>
         </>
@@ -1073,6 +1186,8 @@ function FramePlayerPanel({ range }: { range: TimelineSelection }) {
 
 function Timeline({
   focusRange,
+  frameIndexLoaded,
+  frameSecondsByProvider,
   markers,
   participationRate,
   selection,
@@ -1082,6 +1197,8 @@ function Timeline({
   onSelectionChange
 }: {
   focusRange?: TimelineSelection;
+  frameIndexLoaded: boolean;
+  frameSecondsByProvider: Partial<Record<ChatProvider, number[]>>;
   markers: TimelineMarker[];
   participationRate?: number;
   selection?: TimelineSelection;
@@ -1093,6 +1210,8 @@ function Timeline({
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [hovered, setHovered] = useState<{ window: AnalyticsWindow; x: number; y: number } | undefined>();
   const [frameIndex, setFrameIndex] = useState(0);
+  const frameAvailabilityRef = useRef({ byProvider: frameSecondsByProvider, loaded: frameIndexLoaded });
+  frameAvailabilityRef.current = { byProvider: frameSecondsByProvider, loaded: frameIndexLoaded };
   const [scrollLeft, setScrollLeft] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(760);
   const [followLatest, setFollowLatest] = useState(true);
@@ -1140,16 +1259,22 @@ function Timeline({
   useEffect(() => {
     // windowStart로 키를 잡아서 같은 막대 안에서 마우스가 움직여도(hovered 객체 자체는
     // 매번 새로 생성됨) 재생이 처음부터 다시 시작되지 않고, 다른 막대로 옮겨갈 때만 리셋된다.
+    // frameSecondsByProvider의 5초 폴링 자체는 이 effect를 재시작시키지 않도록 ref로 최신값만 읽는다.
     setFrameIndex(0);
     if (!hovered) {
       return undefined;
     }
-    const frameSeconds = frameSecondsForWindow(hovered.window);
-    if (frameSeconds.length <= 1) {
+    const candidateSeconds = frameSecondsForWindow(hovered.window);
+    const primary = dominantProvider(hovered.window.providerCounts) ?? "chzzk";
+    const { loaded, byProvider } = frameAvailabilityRef.current;
+    const frameCount = loaded
+      ? resolveAvailableFrames(candidateSeconds, byProvider, primary, otherProvider(primary)).seconds.length
+      : candidateSeconds.length;
+    if (frameCount <= 1) {
       return undefined;
     }
     const id = window.setInterval(() => {
-      setFrameIndex((current) => (current + 1) % frameSeconds.length);
+      setFrameIndex((current) => (current + 1) % frameCount);
     }, FRAME_PLAYBACK_INTERVAL_MS);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1273,8 +1398,14 @@ function Timeline({
   const lastRenderIndex = Math.min(filled.length, Math.ceil((scrollLeft + viewportWidth) / SLOT_WIDTH) + RENDER_BUFFER_SLOTS);
   const rendered = filled.slice(firstRenderIndex, lastRenderIndex);
 
-  const hoveredFrameSeconds = hovered ? frameSecondsForWindow(hovered.window) : [];
-  const hoveredFrameSecond = hoveredFrameSeconds[frameIndex] ?? hoveredFrameSeconds[0];
+  const hoveredCandidateSeconds = hovered ? frameSecondsForWindow(hovered.window) : [];
+  const hoveredPrimaryProvider = hovered ? (dominantProvider(hovered.window.providerCounts) ?? "chzzk") : "chzzk";
+  const hoveredResolved = frameIndexLoaded
+    ? resolveAvailableFrames(hoveredCandidateSeconds, frameSecondsByProvider, hoveredPrimaryProvider, otherProvider(hoveredPrimaryProvider))
+    : { provider: hoveredPrimaryProvider, seconds: hoveredCandidateSeconds };
+  const hoveredFrameSeconds = hoveredResolved.seconds;
+  const hoveredFrameSecond = hoveredFrameSeconds[frameIndex % Math.max(hoveredFrameSeconds.length, 1)] ?? hoveredFrameSeconds[0];
+  const hoveredProvider = hoveredResolved.provider;
 
   return (
     <div className="timeline-chart-wrap">
@@ -1378,7 +1509,14 @@ function Timeline({
       </div>
       {hovered && (
         <div className="timeline-tooltip" style={{ left: hovered.x, top: hovered.y }}>
-          {hoveredFrameSecond !== undefined && <FramePreview second={hoveredFrameSecond} />}
+          {hoveredFrameSecond !== undefined && (
+            <FramePreview
+              key={`${hoveredProvider}-${hoveredFrameSecond}`}
+              fallbackProvider={otherProvider(hoveredProvider)}
+              provider={hoveredProvider}
+              second={hoveredFrameSecond}
+            />
+          )}
           <strong>{formatWindowRange(hovered.window)}</strong>
           <span>메시지 {hovered.window.messageCount.toLocaleString()}개</span>
           <span>참여자 {hovered.window.uniqueChatters.toLocaleString()}명</span>

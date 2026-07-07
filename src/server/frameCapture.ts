@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { computeReconnectDelayMs } from "./providers/reconnectBackoff";
+import { nearestFrameSecond } from "../shared/frameSeconds";
 
 const CHZZK_USER_AGENT = "Mozilla/5.0 chzzk-multichat-overlay";
 const FRAME_HEIGHT = 720;
@@ -10,7 +11,6 @@ const FRAME_JPEG_QUALITY = 5;
 const INDEX_REFRESH_MS = 5_000;
 const RETENTION_MS = 48 * 3_600_000;
 const RETENTION_SWEEP_MS = 3_600_000;
-const NEAREST_TOLERANCE_SEC = 15;
 const STALL_THRESHOLD_MS = 15_000;
 const KILL_GRACE_MS = 2_000;
 
@@ -19,6 +19,8 @@ export type FrameCaptureLogLevel = "info" | "warning" | "error";
 export interface FrameCaptureLogger {
   (level: FrameCaptureLogLevel, message: string): void;
 }
+
+export { nearestFrameSecond };
 
 /** livePlaybackJson 문자열에서 HLS 스트림 주소를 뽑는다 */
 export function extractHlsUrl(livePlaybackJson: string): string | undefined {
@@ -32,27 +34,7 @@ export function extractHlsUrl(livePlaybackJson: string): string | undefined {
   }
 }
 
-/** 정렬된 epochSec 배열에서 target 이하의 최근접 값을 찾는다 (허용 오차 초과 시 undefined) */
-export function nearestFrameSecond(sortedSeconds: number[], target: number, toleranceSec = NEAREST_TOLERANCE_SEC): number | undefined {
-  let low = 0;
-  let high = sortedSeconds.length - 1;
-  let best: number | undefined;
-  while (low <= high) {
-    const mid = (low + high) >> 1;
-    if (sortedSeconds[mid] <= target) {
-      best = sortedSeconds[mid];
-      low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
-  }
-  if (best === undefined || target - best > toleranceSec) {
-    return undefined;
-  }
-  return best;
-}
-
-async function fetchChzzkHlsUrl(channelId: string): Promise<string | undefined> {
+export async function fetchChzzkHlsUrl(channelId: string): Promise<string | undefined> {
   const response = await fetch(
     `https://api.chzzk.naver.com/service/v3/channels/${encodeURIComponent(channelId)}/live-detail`,
     {
@@ -72,6 +54,77 @@ async function fetchChzzkHlsUrl(channelId: string): Promise<string | undefined> 
   return typeof playback === "string" ? extractHlsUrl(playback) : undefined;
 }
 
+const SOOP_LIVE_API_URL = "https://live.sooplive.co.kr/afreeca/player_live_api.php";
+const SOOP_PLAY_ORIGIN = "https://play.sooplive.co.kr";
+const SOOP_USER_AGENT = "Mozilla/5.0 soop-multichat-overlay";
+const HLS_URL_PATTERN = /^https?:\/\/\S+\.m3u8(\?\S*)?$/i;
+
+/**
+ * JSON 트리 어디에 있든 .m3u8로 끝나는 URL 문자열을 재귀 탐색한다.
+ * SOOP(구 아프리카TV)의 player_live_api.php 응답은 필드명이 공개 문서화되어 있지 않아,
+ * 특정 키 이름에 의존하는 대신 응답 전체에서 HLS URL을 찾는 방식을 택했다.
+ * 실제 라이브 응답으로 검증되지 않았으므로, 캡처가 계속 안 잡히면 방송 중 브라우저
+ * 네트워크 탭에서 실제 요청/응답을 캡처해 이 함수를 교체해야 한다.
+ */
+export function findHlsUrlDeep(value: unknown, depth = 0): string | undefined {
+  if (depth > 6) {
+    return undefined;
+  }
+  if (typeof value === "string") {
+    return HLS_URL_PATTERN.test(value) ? value : undefined;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findHlsUrlDeep(item, depth + 1);
+      if (found) {
+        return found;
+      }
+    }
+    return undefined;
+  }
+  if (value && typeof value === "object") {
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      const found = findHlsUrlDeep((value as Record<string, unknown>)[key], depth + 1);
+      if (found) {
+        return found;
+      }
+    }
+  }
+  return undefined;
+}
+
+/** SOOP 라이브 재생 정보를 조회해 HLS 주소를 찾는다 (필드명 미검증 — findHlsUrlDeep 주석 참고) */
+export async function fetchSoopHlsUrl(bjId: string): Promise<string | undefined> {
+  const body = new URLSearchParams({
+    bid: bjId,
+    type: "live",
+    pwd: "",
+    player_type: "html5",
+    stream_type: "common",
+    quality: "HD",
+    mode: "landing",
+    from_api: "0"
+  });
+  const response = await fetch(SOOP_LIVE_API_URL, {
+    method: "POST",
+    headers: {
+      Accept: "application/json, text/plain, */*",
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      Origin: SOOP_PLAY_ORIGIN,
+      Referer: `${SOOP_PLAY_ORIGIN}/${encodeURIComponent(bjId)}`,
+      "User-Agent": SOOP_USER_AGENT
+    },
+    body
+  });
+  if (!response.ok) {
+    return undefined;
+  }
+  const json: unknown = await response.json();
+  return findHlsUrlDeep(json);
+}
+
+export type HlsUrlResolver = (channelId: string) => Promise<string | undefined>;
+
 export class FrameCaptureManager {
   private child: ChildProcess | undefined;
   private stopped = true;
@@ -88,6 +141,7 @@ export class FrameCaptureManager {
 
   constructor(
     private readonly framesDir: string,
+    private readonly resolveHlsUrl: HlsUrlResolver,
     private readonly log: FrameCaptureLogger
   ) {}
 
@@ -181,7 +235,7 @@ export class FrameCaptureManager {
     }
     let hlsUrl: string | undefined;
     try {
-      hlsUrl = await fetchChzzkHlsUrl(this.channelId);
+      hlsUrl = await this.resolveHlsUrl(this.channelId);
       if (!hlsUrl) {
         this.lastError = "live-detail 응답에 HLS 주소 없음 (오프라인/DRM/준비중)";
       }
