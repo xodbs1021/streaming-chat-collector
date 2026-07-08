@@ -7,3 +7,7 @@ playwright-report/
 coverage/
 .env
 .DS_Store
+
+# chat-harness 파이프라인이 세션마다 생성하는 중간 산출물 (계획서·검수 결과 등)
+_workspace/
+_workspace_prev/
