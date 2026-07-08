@@ -1,0 +1,101 @@
+import { Eye } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import type { AnalyticsWindow, ChatProvider } from "../../../shared/types";
+import { dominantProvider, filterAvailableSeconds, otherProvider, resolveAvailableFrames, sumProviderCounts } from "../../frameProviderSelection";
+import { FRAME_PLAYBACK_INTERVAL_MS, PROVIDER_LABEL, type TimelineSelection } from "./constants";
+import { formatTime, frameSecondsForRange } from "./format";
+import { FramePreview } from "./FramePreview";
+
+/** 선택된 구간을 크게 자동재생 — 호버 미리보기와 별개로, 클릭해서 고른 구간을 명확히 확인하기 위한 패널 */
+export function FramePlayerPanel({
+  range,
+  windows,
+  frameSecondsByProvider,
+  frameIndexLoaded
+}: {
+  range: TimelineSelection;
+  windows: AnalyticsWindow[];
+  frameSecondsByProvider: Partial<Record<ChatProvider, number[]>>;
+  frameIndexLoaded: boolean;
+}) {
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [manualProvider, setManualProvider] = useState<ChatProvider | undefined>();
+  const candidateSeconds = useMemo(() => frameSecondsForRange(range.startAt, range.endAt), [range.startAt, range.endAt]);
+  const rangeWindows = useMemo(
+    () => windows.filter((window) => window.windowStart < range.endAt && window.windowEnd > range.startAt),
+    [windows, range.startAt, range.endAt]
+  );
+  const rangeCounts = useMemo(() => sumProviderCounts(rangeWindows), [rangeWindows]);
+  const dominant = dominantProvider(rangeCounts) ?? "chzzk";
+
+  // 실제 캡처된 프레임만 남긴다 — 인덱스를 아직 못 받았으면(초기 로드) 옛 방식(이론상 초 전부)으로 우선 표시.
+  // 사용자가 탭으로 플랫폼을 직접 골랐으면 그 선택을 그대로 존중하고(자동 폴백 없음), 안 골랐으면
+  // 채팅량이 더 많은 플랫폼을 우선 시도하되 실제 프레임이 없으면 반대쪽을 시도한다.
+  const resolved = useMemo(() => {
+    if (!frameIndexLoaded) {
+      return { provider: manualProvider ?? dominant, seconds: candidateSeconds };
+    }
+    if (manualProvider) {
+      return { provider: manualProvider, seconds: filterAvailableSeconds(candidateSeconds, frameSecondsByProvider[manualProvider] ?? []) };
+    }
+    return resolveAvailableFrames(candidateSeconds, frameSecondsByProvider, dominant, otherProvider(dominant));
+  }, [frameIndexLoaded, manualProvider, dominant, candidateSeconds, frameSecondsByProvider]);
+
+  const activeProvider = resolved.provider;
+  const seconds = resolved.seconds;
+
+  useEffect(() => {
+    setFrameIndex(0);
+    setManualProvider(undefined);
+  }, [range.startAt, range.endAt]);
+
+  useEffect(() => {
+    if (seconds.length <= 1) {
+      return undefined;
+    }
+    const id = window.setInterval(() => {
+      setFrameIndex((current) => (current + 1) % seconds.length);
+    }, FRAME_PLAYBACK_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [seconds]);
+
+  const activeIndex = seconds.length > 0 ? frameIndex % seconds.length : -1;
+  const second = activeIndex >= 0 ? seconds[activeIndex] : undefined;
+
+  return (
+    <section className="panel frame-player-panel">
+      <div className="panel-title">
+        <Eye size={20} />
+        <h2>
+          선택 구간 재생 · {formatTime(range.startAt)} ~ {formatTime(range.endAt)}
+        </h2>
+        <div className="frame-player-provider-tabs" role="tablist" aria-label="프레임 플랫폼">
+          {(["chzzk", "soop"] as const).map((provider) => (
+            <button
+              aria-selected={activeProvider === provider}
+              className={activeProvider === provider ? "active" : ""}
+              key={provider}
+              onClick={() => setManualProvider(provider)}
+              role="tab"
+              type="button"
+            >
+              {PROVIDER_LABEL[provider]}
+            </button>
+          ))}
+        </div>
+      </div>
+      {second !== undefined ? (
+        <>
+          <FramePreview key={`${activeProvider}-${second}`} large provider={activeProvider} second={second} />
+          <div className="frame-player-scrubber">
+            {seconds.map((s, index) => (
+              <span className={index === activeIndex ? "active" : ""} key={s} />
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="empty-state compact-empty">이 구간의 캡처된 화면이 없습니다.</div>
+      )}
+    </section>
+  );
+}
