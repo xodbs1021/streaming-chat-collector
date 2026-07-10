@@ -7,3 +7,10 @@ playwright-report/
 coverage/
 .env
 .DS_Store
+
+# 하네스 훅 상태 파일 (세션 로컬)
+.claude/.needs-audit
+.claude/.stop-block-count
+
+# 하네스 스크래치
+_workspace/
