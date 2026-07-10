@@ -14,35 +14,25 @@ import type {
   ViewerCountSample,
   WindowComparisonSummary
 } from "../shared/types";
+import { countKeywords, tokenize } from "./analytics/text";
+import {
+  TOP_LIMIT,
+  countBy,
+  countUnique,
+  mapToRank,
+  percentile,
+  rankBy,
+  rankEmotes,
+  rankTerms,
+  round
+} from "./analytics/stats";
 
 const DEFAULT_WINDOW_SEC = 5;
 const VIEWER_SAMPLE_MAX_AGE_MS = 150_000;
 const VIEWER_SAMPLE_LIMIT = 20_000;
 const PARTICIPATION_LOOKBACK_MS = 300_000;
 const MAX_LIVE_RECORDS = 200_000;
-const MAX_KEYWORDS = 8;
 const RECENT_MESSAGE_LIMIT = 30;
-const TOP_LIMIT = 8;
-const STOPWORDS = new Set([
-  "그리고",
-  "그래서",
-  "근데",
-  "그냥",
-  "오늘",
-  "진짜",
-  "너무",
-  "ㅋㅋ",
-  "ㅎㅎ",
-  "the",
-  "and",
-  "for",
-  "you",
-  "that",
-  "this",
-  "with",
-  "are",
-  "was"
-]);
 
 export function summarizeChatRecords(
   records: ChatRecord[],
@@ -618,29 +608,6 @@ function buildWindow(windowStart: number, windowMs: number, records: ChatRecord[
   };
 }
 
-function countKeywords(records: ChatRecord[], keywords: string[]): Record<string, number> | undefined {
-  const normalized = keywords
-    .map((keyword) => keyword.trim().toLowerCase())
-    .filter(Boolean)
-    .slice(0, MAX_KEYWORDS);
-  if (normalized.length === 0) {
-    return undefined;
-  }
-  const counts: Record<string, number> = {};
-  for (const keyword of normalized) {
-    counts[keyword] = 0;
-  }
-  for (const record of records) {
-    const content = record.content.toLowerCase();
-    for (const keyword of normalized) {
-      if (content.includes(keyword)) {
-        counts[keyword] += 1;
-      }
-    }
-  }
-  return counts;
-}
-
 function latestViewerCount(samples: ViewerCountSample[], at: number, maxAgeMs = VIEWER_SAMPLE_MAX_AGE_MS) {
   if (samples.length === 0) {
     return undefined;
@@ -706,83 +673,6 @@ export function computeOverallParticipationRate(records: ChatRecord[], viewerSam
   }
   const uniqueChatters = countUnique(records.map((record) => record.nickname));
   return Math.round((uniqueChatters / averageViewers) * 1000) / 1000;
-}
-
-function countUnique(values: string[]) {
-  return new Set(values.filter(Boolean)).size;
-}
-
-function countBy<T extends string>(records: ChatRecord[], select: (record: ChatRecord) => T) {
-  const counts: Partial<Record<T, number>> = {};
-  for (const record of records) {
-    const key = select(record);
-    counts[key] = (counts[key] ?? 0) + 1;
-  }
-  return counts;
-}
-
-function rankBy(records: ChatRecord[], select: (record: ChatRecord) => string, limit = TOP_LIMIT): AnalyticsRankItem[] {
-  const counts = new Map<string, number>();
-  for (const record of records) {
-    const label = select(record).trim();
-    if (!label) {
-      continue;
-    }
-    counts.set(label, (counts.get(label) ?? 0) + 1);
-  }
-  return mapToRank(counts, limit);
-}
-
-function rankTerms(records: ChatRecord[], limit = TOP_LIMIT): AnalyticsRankItem[] {
-  const counts = new Map<string, number>();
-  for (const record of records) {
-    for (const term of tokenize(record.content)) {
-      counts.set(term, (counts.get(term) ?? 0) + 1);
-    }
-  }
-  return mapToRank(counts, limit);
-}
-
-function rankEmotes(records: ChatRecord[], limit = TOP_LIMIT): AnalyticsRankItem[] {
-  const counts = new Map<string, number>();
-  for (const record of records) {
-    for (const emote of record.emotes) {
-      const label = emote.token || emote.id;
-      if (label) {
-        counts.set(label, (counts.get(label) ?? 0) + 1);
-      }
-    }
-  }
-  return mapToRank(counts, limit);
-}
-
-function mapToRank(counts: Map<string, number>, limit: number): AnalyticsRankItem[] {
-  return Array.from(counts.entries())
-    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-    .slice(0, limit)
-    .map(([label, count]) => ({ label, count }));
-}
-
-function tokenize(content: string) {
-  return content
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .split(/\s+/)
-    .map((term) => term.trim())
-    .filter((term) => term.length >= 2 && !STOPWORDS.has(term));
-}
-
-function percentile(values: number[], ratio: number) {
-  if (values.length === 0) {
-    return 0;
-  }
-  const sorted = [...values].sort((left, right) => left - right);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
-  return sorted[index];
-}
-
-function round(value: number) {
-  return Math.round(value * 10) / 10;
 }
 
 export type CountByProvider = Partial<Record<ChatProvider, number>>;
