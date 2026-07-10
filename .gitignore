@@ -8,6 +8,10 @@ coverage/
 .env
 .DS_Store
 
+# 하네스 훅 상태 파일 (세션 로컬)
+.claude/.needs-audit
+.claude/.stop-block-count
+
 # chat-harness 파이프라인이 세션마다 생성하는 중간 산출물 (계획서·검수 결과 등)
 _workspace/
 _workspace_prev/
