@@ -15,22 +15,22 @@ import type {
   WindowComparisonSummary
 } from "../shared/types";
 import { countKeywords, tokenize } from "./analytics/text";
+import { countUnique, percentile, rankEmotes, rankTerms, round } from "./analytics/stats";
 import {
-  TOP_LIMIT,
-  countBy,
-  countUnique,
-  mapToRank,
-  percentile,
-  rankBy,
-  rankEmotes,
-  rankTerms,
-  round
-} from "./analytics/stats";
+  type WindowAgg,
+  addToGlobalAgg,
+  addToWindowAgg,
+  averageViewerCount,
+  createGlobalAgg,
+  createWindowAgg,
+  finalizeGlobalTops,
+  finalizeWindow,
+  latestViewerCount,
+  participationRate
+} from "./analytics/metrics";
 
 const DEFAULT_WINDOW_SEC = 5;
-const VIEWER_SAMPLE_MAX_AGE_MS = 150_000;
 const VIEWER_SAMPLE_LIMIT = 20_000;
-const PARTICIPATION_LOOKBACK_MS = 300_000;
 const MAX_LIVE_RECORDS = 200_000;
 const RECENT_MESSAGE_LIMIT = 30;
 
@@ -39,50 +39,54 @@ export function summarizeChatRecords(
   windowSec = DEFAULT_WINDOW_SEC,
   session?: RecordingSession,
   viewerSamples: ViewerCountSample[] = [],
-  keywords: string[] = []
+  keywords: string[] = [],
+  now = Date.now()
 ): AnalyticsSummary {
   const safeWindowSec = Math.max(1, Math.round(windowSec));
   const windowMs = safeWindowSec * 1000;
   const sorted = [...records].sort((left, right) => left.timestamp - right.timestamp);
-  const windows = new Map<number, ChatRecord[]>();
+  const global = createGlobalAgg();
+  const windows = new Map<number, WindowAgg>();
 
   for (const record of sorted) {
+    const tokens = tokenize(record.content);
+    addToGlobalAgg(global, record, tokens);
     const windowStart = Math.floor(record.timestamp / windowMs) * windowMs;
-    const bucket = windows.get(windowStart) ?? [];
-    bucket.push(record);
-    windows.set(windowStart, bucket);
+    let agg = windows.get(windowStart);
+    if (!agg) {
+      agg = createWindowAgg(windowStart);
+      windows.set(windowStart, agg);
+    }
+    addToWindowAgg(agg, record, tokens);
   }
 
-  const analyticsWindows: AnalyticsWindow[] = Array.from(windows.entries())
-    .sort(([left], [right]) => left - right)
-    .map(([windowStart, windowRecords]) => {
-      const window = buildWindow(windowStart, windowMs, windowRecords);
-      const windowViewerCount = latestViewerCount(viewerSamples, window.windowEnd);
-      const keywordCounts = countKeywords(windowRecords, keywords);
-      return {
-        ...window,
-        ...(windowViewerCount === undefined ? {} : { viewerCount: windowViewerCount }),
-        ...(keywordCounts ? { keywordCounts } : {})
-      };
+  const analyticsWindows: AnalyticsWindow[] = Array.from(windows.values())
+    .sort((left, right) => left.windowStart - right.windowStart)
+    .map((agg) => {
+      const windowViewerCount = latestViewerCount(viewerSamples, agg.windowStart + windowMs);
+      const window = finalizeWindow(agg, windowMs, windowViewerCount);
+      const keywordCounts = countKeywords(agg.records, keywords);
+      return keywordCounts ? { ...window, keywordCounts } : window;
     });
 
-  const viewerCount = latestViewerCount(viewerSamples, Date.now());
+  const viewerCount = latestViewerCount(viewerSamples, now);
+  const tops = finalizeGlobalTops(global);
 
   return {
     viewerCount,
-    participationRate: computeParticipationRate(sorted, viewerSamples, viewerCount),
-    generatedAt: Date.now(),
+    participationRate: participationRate(global.chatterLastSeen, viewerSamples, viewerCount, now),
+    generatedAt: now,
     windowSec: safeWindowSec,
     totalMessages: sorted.length,
-    uniqueChatters: countUnique(sorted.map((record) => record.nickname)),
+    uniqueChatters: global.uniqueNicknames.size,
     startedAt: session?.startedAt ?? sorted[0]?.timestamp,
     endedAt: session?.endedAt ?? sorted.at(-1)?.timestamp,
     session,
-    providerCounts: countBy(sorted, (record) => record.provider),
-    roleCounts: countBy(sorted, (record) => record.role),
-    topChatters: rankBy(sorted, (record) => record.nickname),
-    topTerms: rankTerms(sorted),
-    topEmotes: rankEmotes(sorted),
+    providerCounts: { ...global.providerCounts },
+    roleCounts: { ...global.roleCounts },
+    topChatters: tops.topChatters,
+    topTerms: tops.topTerms,
+    topEmotes: tops.topEmotes,
     recentMessages: sorted.slice(-RECENT_MESSAGE_LIMIT).reverse(),
     windows: analyticsWindows
   };
@@ -112,17 +116,20 @@ export function summarizeHighlightCandidates(
     };
   }
 
-  const buckets = new Map<number, ChatRecord[]>();
+  const buckets = new Map<number, WindowAgg>();
   for (const record of sorted) {
     const windowStart = Math.floor(record.timestamp / windowMs) * windowMs;
-    const bucket = buckets.get(windowStart) ?? [];
-    bucket.push(record);
-    buckets.set(windowStart, bucket);
+    let agg = buckets.get(windowStart);
+    if (!agg) {
+      agg = createWindowAgg(windowStart);
+      buckets.set(windowStart, agg);
+    }
+    addToWindowAgg(agg, record, tokenize(record.content));
   }
 
-  const windows = Array.from(buckets.entries())
-    .sort(([left], [right]) => left - right)
-    .map(([windowStart, windowRecords]) => buildWindow(windowStart, windowMs, windowRecords));
+  const windows = Array.from(buckets.values())
+    .sort((left, right) => left.windowStart - right.windowStart)
+    .map((agg) => finalizeWindow(agg, windowMs, undefined));
   const counts = windows.map((window) => window.messageCount).filter((count) => count > 0);
   const activeWindowMean = counts.length ? round(counts.reduce((sum, count) => sum + count, 0) / counts.length) : 0;
   const p95 = percentile(counts, 0.95);
@@ -186,23 +193,10 @@ const LIVE_TRIM_CHUNK = 10_000;
 const MAX_BUCKET_SETS = 6;
 const GLOBAL_TOPS_CACHE_MS = 1_000;
 
-interface LiveWindowAgg {
-  windowStart: number;
-  records: ChatRecord[];
-  uniqueNicknames: Set<string>;
-  chatterCounts: Map<string, number>;
-  termCounts: Map<string, number>;
-  emoteCounts: Map<string, number>;
-  providerCounts: Partial<Record<ChatProvider, number>>;
-  roleCounts: Partial<Record<ChatRole, number>>;
-  lengthSum: number;
-  maxLength: number;
-}
-
 interface LiveBucketSet {
   windowSec: number;
   windowMs: number;
-  buckets: Map<number, LiveWindowAgg>;
+  buckets: Map<number, WindowAgg>;
   materialized: Map<number, AnalyticsWindow>;
   dirtyStarts: Set<number>;
 }
@@ -215,22 +209,20 @@ export interface LiveSummaryOptions {
 export class LiveAnalytics {
   private records: ChatRecord[] = [];
   private viewerSamples: ViewerCountSample[] = [];
-  private uniqueNicknames = new Set<string>();
-  private chatterCounts = new Map<string, number>();
-  private termCounts = new Map<string, number>();
-  private emoteCounts = new Map<string, number>();
-  private providerCounts: Partial<Record<ChatProvider, number>> = {};
-  private roleCounts: Partial<Record<ChatRole, number>> = {};
-  private chatterLastSeen = new Map<string, number>();
+  private global = createGlobalAgg();
   private bucketSets = new Map<number, LiveBucketSet>();
   private globalTopsCache:
     | { at: number; topChatters: AnalyticsRankItem[]; topTerms: AnalyticsRankItem[]; topEmotes: AnalyticsRankItem[] }
     | undefined;
 
+  // clock 주입으로 addViewerSample 타임스탬프·참여율 cutoff·tops 캐시·generatedAt·전역 viewerCount를
+  // 결정론적으로 대조할 수 있게 한다(기본값 Date.now로 운영 동작 불변).
+  constructor(private clock: () => number = Date.now) {}
+
   append(record: ChatRecord) {
     this.insertSorted(record);
     const tokens = tokenize(record.content);
-    this.applyGlobal(record, tokens);
+    addToGlobalAgg(this.global, record, tokens);
     for (const set of this.bucketSets.values()) {
       applyToBucketSet(set, record, tokens);
     }
@@ -249,7 +241,7 @@ export class LiveAnalytics {
     if (!Number.isFinite(count) || count < 0) {
       return;
     }
-    const sample: ViewerCountSample = { provider, timestamp: Date.now(), count: Math.round(count) };
+    const sample: ViewerCountSample = { provider, timestamp: this.clock(), count: Math.round(count) };
     this.viewerSamples.push(sample);
     if (this.viewerSamples.length > VIEWER_SAMPLE_LIMIT) {
       this.viewerSamples = this.viewerSamples.slice(-VIEWER_SAMPLE_LIMIT);
@@ -264,13 +256,7 @@ export class LiveAnalytics {
 
   reset() {
     this.records = [];
-    this.uniqueNicknames.clear();
-    this.chatterCounts.clear();
-    this.termCounts.clear();
-    this.emoteCounts.clear();
-    this.providerCounts = {};
-    this.roleCounts = {};
-    this.chatterLastSeen.clear();
+    this.global = createGlobalAgg();
     this.bucketSets.clear();
     this.globalTopsCache = undefined;
   }
@@ -297,20 +283,20 @@ export class LiveAnalytics {
       const keywordCounts = bucket ? countKeywords(bucket.records, keywords) : undefined;
       return keywordCounts ? { ...materialized, keywordCounts } : materialized;
     });
-    const viewerCount = latestViewerCount(this.viewerSamples, Date.now());
+    const viewerCount = latestViewerCount(this.viewerSamples, this.clock());
 
     return {
       viewerCount,
       participationRate: this.computeParticipation(viewerCount),
-      generatedAt: Date.now(),
+      generatedAt: this.clock(),
       windowSec: safeWindowSec,
       totalMessages: this.records.length,
-      uniqueChatters: this.uniqueNicknames.size,
+      uniqueChatters: this.global.uniqueNicknames.size,
       startedAt: session?.startedAt ?? this.records[0]?.timestamp,
       endedAt: session?.endedAt ?? this.records.at(-1)?.timestamp,
       session,
-      providerCounts: { ...this.providerCounts },
-      roleCounts: { ...this.roleCounts },
+      providerCounts: { ...this.global.providerCounts },
+      roleCounts: { ...this.global.roleCounts },
       ...this.getGlobalTops(),
       // 0.1초 주기 소켓 푸시(partial)에는 최근 메시지를 싣지 않아 페이로드를 줄임
       recentMessages: isPartial ? [] : this.records.slice(-RECENT_MESSAGE_LIMIT).reverse(),
@@ -334,31 +320,6 @@ export class LiveAnalytics {
       index -= 1;
     }
     this.records.splice(index, 0, record);
-  }
-
-  private applyGlobal(record: ChatRecord, tokens: string[]) {
-    if (record.nickname) {
-      this.uniqueNicknames.add(record.nickname);
-      const lastSeen = this.chatterLastSeen.get(record.nickname) ?? 0;
-      if (record.timestamp > lastSeen) {
-        this.chatterLastSeen.set(record.nickname, record.timestamp);
-      }
-    }
-    const trimmedNickname = record.nickname.trim();
-    if (trimmedNickname) {
-      this.chatterCounts.set(trimmedNickname, (this.chatterCounts.get(trimmedNickname) ?? 0) + 1);
-    }
-    this.providerCounts[record.provider] = (this.providerCounts[record.provider] ?? 0) + 1;
-    this.roleCounts[record.role] = (this.roleCounts[record.role] ?? 0) + 1;
-    for (const term of tokens) {
-      this.termCounts.set(term, (this.termCounts.get(term) ?? 0) + 1);
-    }
-    for (const emote of record.emotes) {
-      const label = emote.token || emote.id;
-      if (label) {
-        this.emoteCounts.set(label, (this.emoteCounts.get(label) ?? 0) + 1);
-      }
-    }
   }
 
   private ensureBucketSet(windowSec: number): LiveBucketSet {
@@ -394,65 +355,28 @@ export class LiveAnalytics {
       if (!agg) {
         continue;
       }
-      const windowEnd = windowStart + set.windowMs;
-      const viewerCount = latestViewerCount(this.viewerSamples, windowEnd);
-      set.materialized.set(windowStart, {
-        windowStart,
-        windowEnd,
-        messageCount: agg.records.length,
-        uniqueChatters: agg.uniqueNicknames.size,
-        avgLength: agg.records.length ? round(agg.lengthSum / agg.records.length) : 0,
-        maxLength: agg.maxLength,
-        providerCounts: { ...agg.providerCounts },
-        roleCounts: { ...agg.roleCounts },
-        topChatters: mapToRank(agg.chatterCounts, 5),
-        topTerms: mapToRank(agg.termCounts, 5),
-        topEmotes: mapToRank(agg.emoteCounts, 5),
-        ...(viewerCount === undefined ? {} : { viewerCount })
-      });
+      const viewerCount = latestViewerCount(this.viewerSamples, windowStart + set.windowMs);
+      set.materialized.set(windowStart, finalizeWindow(agg, set.windowMs, viewerCount));
     }
     set.dirtyStarts.clear();
   }
 
   /** 전역 상위 랭킹은 0.1초 emit마다 큰 Map을 정렬하지 않도록 1초 캐시 */
   private getGlobalTops() {
-    const now = Date.now();
+    const now = this.clock();
     if (!this.globalTopsCache || now - this.globalTopsCache.at >= GLOBAL_TOPS_CACHE_MS) {
-      this.globalTopsCache = {
-        at: now,
-        topChatters: mapToRank(this.chatterCounts, TOP_LIMIT),
-        topTerms: mapToRank(this.termCounts, TOP_LIMIT),
-        topEmotes: mapToRank(this.emoteCounts, TOP_LIMIT)
-      };
+      this.globalTopsCache = { at: now, ...finalizeGlobalTops(this.global) };
     }
     const { topChatters, topTerms, topEmotes } = this.globalTopsCache;
     return { topChatters, topTerms, topEmotes };
   }
 
   private computeParticipation(fallbackViewerCount: number | undefined) {
-    const cutoff = Date.now() - PARTICIPATION_LOOKBACK_MS;
-    // 분자(기간 내 채팅러)와 분모(같은 기간의 평균 시청자)를 동일 구간으로 맞춤
-    const averageViewers = averageViewerCount(this.viewerSamples, cutoff) ?? fallbackViewerCount;
-    if (averageViewers === undefined || averageViewers <= 0) {
-      return undefined;
-    }
-    let recentChatters = 0;
-    for (const lastSeen of this.chatterLastSeen.values()) {
-      if (lastSeen >= cutoff) {
-        recentChatters += 1;
-      }
-    }
-    return Math.round((recentChatters / averageViewers) * 1000) / 1000;
+    return participationRate(this.global.chatterLastSeen, this.viewerSamples, fallbackViewerCount, this.clock());
   }
 
   private rebuildAggregates() {
-    this.uniqueNicknames.clear();
-    this.chatterCounts.clear();
-    this.termCounts.clear();
-    this.emoteCounts.clear();
-    this.providerCounts = {};
-    this.roleCounts = {};
-    this.chatterLastSeen.clear();
+    this.global = createGlobalAgg();
     const sets = Array.from(this.bucketSets.values());
     for (const set of sets) {
       set.buckets.clear();
@@ -461,7 +385,7 @@ export class LiveAnalytics {
     }
     for (const record of this.records) {
       const tokens = tokenize(record.content);
-      this.applyGlobal(record, tokens);
+      addToGlobalAgg(this.global, record, tokens);
       for (const set of sets) {
         applyToBucketSet(set, record, tokens);
       }
@@ -473,41 +397,10 @@ function applyToBucketSet(set: LiveBucketSet, record: ChatRecord, tokens: string
   const windowStart = Math.floor(record.timestamp / set.windowMs) * set.windowMs;
   let agg = set.buckets.get(windowStart);
   if (!agg) {
-    agg = {
-      windowStart,
-      records: [],
-      uniqueNicknames: new Set(),
-      chatterCounts: new Map(),
-      termCounts: new Map(),
-      emoteCounts: new Map(),
-      providerCounts: {},
-      roleCounts: {},
-      lengthSum: 0,
-      maxLength: 0
-    };
+    agg = createWindowAgg(windowStart);
     set.buckets.set(windowStart, agg);
   }
-  agg.records.push(record);
-  if (record.nickname) {
-    agg.uniqueNicknames.add(record.nickname);
-  }
-  const trimmedNickname = record.nickname.trim();
-  if (trimmedNickname) {
-    agg.chatterCounts.set(trimmedNickname, (agg.chatterCounts.get(trimmedNickname) ?? 0) + 1);
-  }
-  agg.providerCounts[record.provider] = (agg.providerCounts[record.provider] ?? 0) + 1;
-  agg.roleCounts[record.role] = (agg.roleCounts[record.role] ?? 0) + 1;
-  for (const term of tokens) {
-    agg.termCounts.set(term, (agg.termCounts.get(term) ?? 0) + 1);
-  }
-  for (const emote of record.emotes) {
-    const label = emote.token || emote.id;
-    if (label) {
-      agg.emoteCounts.set(label, (agg.emoteCounts.get(label) ?? 0) + 1);
-    }
-  }
-  agg.lengthSum += record.content.length;
-  agg.maxLength = Math.max(agg.maxLength, record.content.length);
+  addToWindowAgg(agg, record, tokens);
   set.dirtyStarts.add(windowStart);
 }
 
@@ -589,80 +482,6 @@ function buildCandidate(
 function strongestLevel(levels: HighlightLevel[]) {
   const score: Record<HighlightLevel, number> = { review: 1, highlight: 2, strong: 3 };
   return levels.reduce<HighlightLevel>((best, level) => (score[level] > score[best] ? level : best), "review");
-}
-
-function buildWindow(windowStart: number, windowMs: number, records: ChatRecord[]): AnalyticsWindow {
-  const lengths = records.map((record) => record.content.length);
-  return {
-    windowStart,
-    windowEnd: windowStart + windowMs,
-    messageCount: records.length,
-    uniqueChatters: countUnique(records.map((record) => record.nickname)),
-    avgLength: lengths.length ? round(lengths.reduce((sum, length) => sum + length, 0) / lengths.length) : 0,
-    maxLength: lengths.length ? Math.max(...lengths) : 0,
-    providerCounts: countBy(records, (record) => record.provider),
-    roleCounts: countBy(records, (record) => record.role),
-    topChatters: rankBy(records, (record) => record.nickname, 5),
-    topTerms: rankTerms(records, 5),
-    topEmotes: rankEmotes(records, 5)
-  };
-}
-
-function latestViewerCount(samples: ViewerCountSample[], at: number, maxAgeMs = VIEWER_SAMPLE_MAX_AGE_MS) {
-  if (samples.length === 0) {
-    return undefined;
-  }
-  const latestByProvider = new Map<ViewerCountSample["provider"], number>();
-  for (const sample of samples) {
-    if (sample.timestamp > at || at - sample.timestamp > maxAgeMs) {
-      continue;
-    }
-    latestByProvider.set(sample.provider, sample.count);
-  }
-  if (latestByProvider.size === 0) {
-    return undefined;
-  }
-  let total = 0;
-  for (const count of latestByProvider.values()) {
-    total += count;
-  }
-  return total;
-}
-
-function computeParticipationRate(
-  sorted: ChatRecord[],
-  viewerSamples: ViewerCountSample[],
-  fallbackViewerCount: number | undefined
-) {
-  const cutoff = Date.now() - PARTICIPATION_LOOKBACK_MS;
-  // 분자(기간 내 채팅러)와 분모(같은 기간의 평균 시청자)를 동일 구간으로 맞춤
-  const averageViewers = averageViewerCount(viewerSamples, cutoff) ?? fallbackViewerCount;
-  if (averageViewers === undefined || averageViewers <= 0) {
-    return undefined;
-  }
-  const recentChatters = countUnique(sorted.filter((record) => record.timestamp >= cutoff).map((record) => record.nickname));
-  return Math.round((recentChatters / averageViewers) * 1000) / 1000;
-}
-
-function averageViewerCount(samples: ViewerCountSample[], cutoff?: number) {
-  const perProvider = new Map<ViewerCountSample["provider"], { sum: number; count: number }>();
-  for (const sample of samples) {
-    if (cutoff !== undefined && sample.timestamp < cutoff) {
-      continue;
-    }
-    const agg = perProvider.get(sample.provider) ?? { sum: 0, count: 0 };
-    agg.sum += sample.count;
-    agg.count += 1;
-    perProvider.set(sample.provider, agg);
-  }
-  if (perProvider.size === 0) {
-    return undefined;
-  }
-  let total = 0;
-  for (const agg of perProvider.values()) {
-    total += agg.sum / agg.count;
-  }
-  return total;
 }
 
 /** 방송 전체 기간 참여율 — 5분 롤링(현재 분위기)과 달리 세션 종료 후 최종 지표로 내보내기용 */

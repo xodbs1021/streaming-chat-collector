@@ -1,20 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { LiveAnalytics, summarizeChatRecords } from "../src/server/analytics";
-import type { ChatRecord } from "../src/shared/types";
+import type { ChatRecord, ViewerCountSample } from "../src/shared/types";
 
 /**
  * B4 안전망 (골든 테스트).
  *
- * analytics.ts는 "레코드를 윈도우로 버킷팅해 지표를 계산"하는 로직을 두 벌 갖고 있다:
- *   - 배치:  summarizeChatRecords → buildWindow / rankBy·rankTerms·rankEmotes
- *   - 라이브: LiveAnalytics → applyToBucketSet + materializeDirty / applyGlobal + getGlobalTops
+ * analytics.ts는 "레코드를 윈도우로 버킷팅해 지표를 계산"하는 로직을 배치·라이브 두 경로로 갖고 있고,
+ * B4에서 공유 지표 정의(analytics/metrics.ts)로 통합했다. 이 스위트는 두 경로가 "정확히 같은 값을
+ * 내는지"를 못 박는 계약이다.
  *
- * B4(두 경로를 공유 지표 정의로 통합)를 안전하게 하려면, 통합 전 두 경로가
- * "지금 정확히 같은 값을 내는지"를 못 박아야 한다. 이 스위트가 그 계약이다.
- *
- * 벽시계(Date.now)에 의존하는 필드(viewerCount·participationRate)는 여기서 제외한다 —
- * LiveAnalytics.addViewerSample이 샘플 타임스탬프를 스스로 now로 찍어, 배치의 명시적
- * viewerSamples와 결정론적으로 맞추기 어렵기 때문. 그 parity는 B4에서 별도로 다룬다.
+ * 아래 첫 스위트는 벽시계 비의존 필드(windows·집계·랭킹)를 대조한다. 벽시계(now)에 의존하는
+ * 필드(viewerCount·participationRate)는 두 번째 스위트에서 clock 주입으로 결정론적으로 맞춘다 —
+ * LiveAnalytics(clock)와 summarizeChatRecords(..., now)에 동일한 가짜 시계를 넣는다.
  */
 
 function makeRecord(patch: Partial<ChatRecord>): ChatRecord {
@@ -101,9 +98,10 @@ describe("batch vs live analytics parity (B4 golden net)", () => {
     assertParity(sameWindow, 5);
   });
 
-  // 현재 동작을 못 박는다: 닉네임 신원 처리가 배치와 라이브에서 같아야 한다.
-  // (uniqueChatters는 untrimmed, topChatters는 trimmed라는 내부 불일치가 있으나 —
-  //  그건 두 경로가 "똑같이" 갖는 특성이라 parity는 유지된다. B4가 이걸 바꾸면 여기서 깨진다.)
+  // 닉네임 신원이 배치와 라이브에서 같아야 한다. B4에서 신원을 nickname.trim()으로 통일했으므로
+  // uniqueChatters·topChatters·chatterLastSeen 모두 trimmed 기준이다: "alice"와 " alice "는 한 사람으로
+  // 합쳐지고 공백만인 닉네임은 제외된다(이 케이스의 uniqueChatters는 3이 아니라 1). 두 경로가 동일하게
+  // 그 규칙을 따르므로 parity는 유지된다.
   it("treats whitespace in nicknames identically across both paths", () => {
     const records = [
       makeRecord({ timestamp: 100, sequence: 1, nickname: "alice", content: "가" }),
@@ -111,5 +109,149 @@ describe("batch vs live analytics parity (B4 golden net)", () => {
       makeRecord({ timestamp: 300, sequence: 3, nickname: "  ", content: "다" })
     ];
     assertParity(records, 5);
+  });
+});
+
+// 벽시계(now) 의존 필드 parity — 가짜 clock을 배치·라이브 양쪽에 동일하게 주입해 결정론적으로 대조한다.
+// 라이브는 new LiveAnalytics(clock), 배치는 summarizeChatRecords(..., now). viewerSamples는 clock을
+// 미리 세팅하고 addViewerSample을 호출해 라이브가 찍는 타임스탬프를 배치의 명시 샘플과 맞춘다.
+describe("batch vs live wall-clock parity (B4 clock injection)", () => {
+  const MAX_AGE_MS = 150_000;
+  const LOOKBACK_MS = 300_000;
+
+  // 동일한 viewerSamples 배열로 라이브를 채운다: 각 샘플 시점으로 시계를 옮긴 뒤 addViewerSample 호출.
+  function feedLive(live: LiveAnalytics, setNow: (at: number) => void, samples: ViewerCountSample[]) {
+    for (const sample of samples) {
+      setNow(sample.timestamp);
+      live.addViewerSample(sample.provider, sample.count);
+    }
+  }
+
+  it("agrees on global viewerCount across providers", () => {
+    let now = 1_000_000;
+    const samples: ViewerCountSample[] = [
+      { provider: "chzzk", timestamp: now - 10_000, count: 100 },
+      { provider: "chzzk", timestamp: now - 5_000, count: 120 },
+      { provider: "soop", timestamp: now - 3_000, count: 40 }
+    ];
+    const live = new LiveAnalytics(() => now);
+    feedLive(live, (at) => (now = at), samples);
+    now = 1_000_000;
+
+    const batch = summarizeChatRecords([], 5, undefined, samples, [], now);
+    const summary = live.getSummary(undefined, 5);
+
+    expect(summary.viewerCount).toBe(160);
+    expect(summary.viewerCount).toBe(batch.viewerCount);
+  });
+
+  it("agrees on per-window viewerCount within the sample max age", () => {
+    const base = 5_000_000;
+    let now = base;
+    const records = [
+      makeRecord({ timestamp: base, sequence: 1, messageId: "w-1", nickname: "a", content: "가" }),
+      makeRecord({ timestamp: base + 1_000, sequence: 2, messageId: "w-2", nickname: "b", content: "나" })
+    ];
+    // 윈도우 [base, base+5000)의 windowEnd=base+5000, 샘플은 그 이내(age 3000 < MAX_AGE)라 잡힌다.
+    const samples: ViewerCountSample[] = [{ provider: "chzzk", timestamp: base + 2_000, count: 77 }];
+    const live = new LiveAnalytics(() => now);
+    feedLive(live, (at) => (now = at), samples);
+    for (const record of records) {
+      live.append(record);
+    }
+    now = base + 10_000;
+
+    const batch = summarizeChatRecords(records, 5, undefined, samples, [], now);
+    const summary = live.getSummary(undefined, 5);
+
+    expect(summary.windows).toEqual(batch.windows);
+    expect(summary.windows[0]?.viewerCount).toBe(77);
+    expect(now - MAX_AGE_MS).toBeLessThan(base + 2_000);
+  });
+
+  it("agrees on participationRate for records straddling the lookback cutoff", () => {
+    const t = 2_000_000;
+    let now = t;
+    const cutoff = t - LOOKBACK_MS;
+    const records = [
+      makeRecord({ timestamp: t - 10_000, sequence: 1, messageId: "p-1", nickname: "a", content: "가" }),
+      makeRecord({ timestamp: t - 20_000, sequence: 2, messageId: "p-2", nickname: "b", content: "나" }),
+      makeRecord({ timestamp: cutoff - 100_000, sequence: 3, messageId: "p-3", nickname: "c", content: "다" })
+    ];
+    const samples: ViewerCountSample[] = [{ provider: "chzzk", timestamp: t - 5_000, count: 50 }];
+    const live = new LiveAnalytics(() => now);
+    feedLive(live, (at) => (now = at), samples);
+    for (const record of records) {
+      live.append(record);
+    }
+    now = t;
+
+    const batch = summarizeChatRecords(records, 5, undefined, samples, [], now);
+    const summary = live.getSummary(undefined, 5);
+
+    // 분자: cutoff 이후 채팅러 a·b = 2, c는 제외. 분모: 평균 시청자 50. => 2/50 = 0.04
+    expect(summary.participationRate).toBe(0.04);
+    expect(summary.participationRate).toBe(batch.participationRate);
+  });
+
+  it("agrees that viewerCount is undefined when only stale samples exist", () => {
+    const t = 3_000_000;
+    let now = t;
+    const samples: ViewerCountSample[] = [{ provider: "chzzk", timestamp: t - 200_000, count: 30 }];
+    const live = new LiveAnalytics(() => now);
+    feedLive(live, (at) => (now = at), samples);
+    now = t;
+
+    const batch = summarizeChatRecords([], 5, undefined, samples, [], now);
+    const summary = live.getSummary(undefined, 5);
+
+    expect(summary.viewerCount).toBeUndefined();
+    expect(batch.viewerCount).toBeUndefined();
+  });
+
+  it("agrees that both metrics are undefined when no samples exist", () => {
+    const t = 3_500_000;
+    let now = t;
+    const records = [makeRecord({ timestamp: t - 1_000, sequence: 1, nickname: "a", content: "가" })];
+    const live = new LiveAnalytics(() => now);
+    for (const record of records) {
+      live.append(record);
+    }
+    now = t;
+
+    const batch = summarizeChatRecords(records, 5, undefined, [], [], now);
+    const summary = live.getSummary(undefined, 5);
+
+    expect(summary.viewerCount).toBeUndefined();
+    expect(batch.viewerCount).toBeUndefined();
+    expect(summary.participationRate).toBeUndefined();
+    expect(batch.participationRate).toBeUndefined();
+  });
+
+  it("agrees on trimmed-identity participation numerator", () => {
+    const t = 4_000_000;
+    let now = t;
+    // 신원 통일: "alice"와 " alice "는 한 사람, "  "는 제외 => 분자 1.
+    const records = [
+      makeRecord({ timestamp: t - 1_000, sequence: 1, messageId: "t-1", nickname: "alice", content: "가" }),
+      makeRecord({ timestamp: t - 2_000, sequence: 2, messageId: "t-2", nickname: " alice ", content: "나" }),
+      makeRecord({ timestamp: t - 3_000, sequence: 3, messageId: "t-3", nickname: "  ", content: "다" })
+    ];
+    const samples: ViewerCountSample[] = [{ provider: "chzzk", timestamp: t - 1_000, count: 25 }];
+    const live = new LiveAnalytics(() => now);
+    feedLive(live, (at) => (now = at), samples);
+    for (const record of records) {
+      live.append(record);
+    }
+    now = t;
+
+    const batch = summarizeChatRecords(records, 5, undefined, samples, [], now);
+    const summary = live.getSummary(undefined, 5);
+
+    // 분자 1, 분모 25 => 1/25 = 0.04
+    expect(summary.participationRate).toBe(0.04);
+    expect(summary.participationRate).toBe(batch.participationRate);
+    expect(summary.uniqueChatters).toBe(1);
+    expect(batch.uniqueChatters).toBe(1);
   });
 });
