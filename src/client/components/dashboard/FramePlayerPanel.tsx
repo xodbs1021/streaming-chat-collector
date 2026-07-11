@@ -1,6 +1,7 @@
 import { Eye } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { AnalyticsWindow, ChatProvider } from "../../../shared/types";
+import type { FrameCaptureStatus } from "../../../shared/frameCaptureStatus";
 import { dominantProvider, filterAvailableSeconds, otherProvider, resolveAvailableFrames, sumProviderCounts } from "../../frameProviderSelection";
 import { FRAME_PLAYBACK_INTERVAL_MS, PROVIDER_LABEL, type TimelineSelection } from "./constants";
 import { formatTime, frameSecondsForRange } from "./format";
@@ -11,11 +12,13 @@ export function FramePlayerPanel({
   range,
   windows,
   frameSecondsByProvider,
+  frameCaptureStatusByProvider,
   frameIndexLoaded
 }: {
   range: TimelineSelection;
   windows: AnalyticsWindow[];
   frameSecondsByProvider: Partial<Record<ChatProvider, number[]>>;
+  frameCaptureStatusByProvider?: Partial<Record<ChatProvider, FrameCaptureStatus>>;
   frameIndexLoaded: boolean;
 }) {
   const [frameIndex, setFrameIndex] = useState(0);
@@ -43,6 +46,8 @@ export function FramePlayerPanel({
 
   const activeProvider = resolved.provider;
   const seconds = resolved.seconds;
+  const captureStatus = frameCaptureStatusByProvider?.[activeProvider];
+  const captureReason = captureStatus && captureStatus.state !== "idle" ? captureStatus.message : undefined;
 
   useEffect(() => {
     setFrameIndex(0);
@@ -83,6 +88,7 @@ export function FramePlayerPanel({
             </button>
           ))}
         </div>
+        {captureStatus && captureReason && <span className={`capture-badge capture-${captureStatus.state}`}>{captureReason}</span>}
       </div>
       {second !== undefined ? (
         <>
@@ -94,7 +100,7 @@ export function FramePlayerPanel({
           </div>
         </>
       ) : (
-        <div className="empty-state compact-empty">이 구간의 캡처된 화면이 없습니다.</div>
+        <div className="empty-state compact-empty">이 구간의 캡처된 화면이 없습니다.{captureReason ? ` (${captureReason})` : ""}</div>
       )}
     </section>
   );

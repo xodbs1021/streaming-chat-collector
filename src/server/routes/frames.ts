@@ -19,7 +19,7 @@ export function registerFrameRoutes(app: FastifyInstance, deps: FrameRouteDeps) 
     if (!manager) {
       return reply.code(404).send({ error: "지원하지 않는 provider입니다." });
     }
-    return manager.getDebugState();
+    return { ...manager.getDebugState(), capture: manager.getCaptureStatus() };
   });
 
   app.get<{ Params: { provider: string }; Querystring: { from?: string; to?: string } }>(
