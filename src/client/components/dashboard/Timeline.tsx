@@ -16,7 +16,7 @@ import {
   TIME_LABEL_SLOT_INTERVAL,
   type TimelineSelection
 } from "./constants";
-import { formatPercent, formatTime, formatWindowRange, frameSecondsForWindow, markerColor } from "./format";
+import { formatFrameTimestamp, formatPercent, formatTime, formatWindowRange, frameSecondsForWindow, markerColor } from "./format";
 import { formatWindowLevel, getWindowVisualLevel } from "./highlight";
 import { FramePreview } from "./FramePreview";
 
@@ -352,6 +352,11 @@ export function Timeline({
               provider={hoveredProvider}
               second={hoveredFrameSecond}
             />
+          )}
+          {hoveredFrameSecond !== undefined && (
+            <time className="frame-timestamp" dateTime={new Date(hoveredFrameSecond * 1000).toISOString()}>
+              {formatFrameTimestamp(hoveredFrameSecond)}
+            </time>
           )}
           <strong>{formatWindowRange(hovered.window)}</strong>
           <span>메시지 {hovered.window.messageCount.toLocaleString()}개</span>

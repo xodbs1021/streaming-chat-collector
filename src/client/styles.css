@@ -2075,6 +2075,20 @@ time {
   object-fit: contain;
 }
 
+/* 프레임의 촬영 시각(KST) — 파일명은 에폭 초 그대로, 표시만 변환 */
+.frame-timestamp {
+  display: block;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: #cbe5d7;
+  opacity: 0.85;
+}
+
+:root[data-theme="light"] .frame-timestamp {
+  color: #3c5c4d;
+}
+
 .frame-player-scrubber {
   display: flex;
   justify-content: center;
