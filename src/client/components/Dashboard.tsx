@@ -14,7 +14,8 @@ import type {
   TimelineMarker,
   WindowComparisonSummary
 } from "../../shared/types";
-import { fetchFrameSeconds } from "../frameIndexClient";
+import { fetchFrameCaptureStatus, fetchFrameSeconds } from "../frameIndexClient";
+import type { FrameCaptureStatus } from "../../shared/frameCaptureStatus";
 import { socket } from "../socket";
 import { fetchJson } from "./dashboard/api";
 import { avgMessageLength, maxWindow, mergePartialSummary } from "./dashboard/analytics";
@@ -23,6 +24,7 @@ import {
   MARKER_PRESETS,
   MAX_TRACKED_KEYWORDS,
   MIN_SPIKE_SAMPLE_WINDOWS,
+  PROVIDER_LABEL,
   SESSIONS_REFRESH_THROTTLE_MS,
   SPIKE_ALERT_MAX_AGE_MS,
   SPIKE_TOAST_LIFETIME_MS,
@@ -81,6 +83,7 @@ export function DashboardRoute() {
   const [canSaveMarkers, setCanSaveMarkers] = useState(false);
   const [markerLabelInput, setMarkerLabelInput] = useState("");
   const [frameSecondsByProvider, setFrameSecondsByProvider] = useState<Partial<Record<ChatProvider, number[]>>>({});
+  const [frameCaptureStatusByProvider, setFrameCaptureStatusByProvider] = useState<Partial<Record<ChatProvider, FrameCaptureStatus>>>({});
   const [frameIndexLoaded, setFrameIndexLoaded] = useState(false);
   const windowSecRef = useRef(windowSec);
   const selectedSessionIdRef = useRef(selectedSessionId);
@@ -152,6 +155,16 @@ export function DashboardRoute() {
     let cancelled = false;
 
     async function refreshFrameIndex() {
+      // 캡처 상태 뱃지는 세션 윈도우가 없어도 항상 노출해야 하므로, 윈도우 유무와 무관하게 먼저 조회한다.
+      // Promise.allSettled로 두 provider·프레임 인덱스와 상호 실패를 격리한다.
+      const [chzzkStatus, soopStatus] = await Promise.allSettled([fetchFrameCaptureStatus("chzzk"), fetchFrameCaptureStatus("soop")]);
+      if (!cancelled) {
+        setFrameCaptureStatusByProvider({
+          chzzk: chzzkStatus.status === "fulfilled" ? chzzkStatus.value : undefined,
+          soop: soopStatus.status === "fulfilled" ? soopStatus.value : undefined
+        });
+      }
+
       const windows = summaryWindowsRef.current;
       if (windows.length === 0) {
         return;
@@ -383,6 +396,10 @@ export function DashboardRoute() {
       : [];
   const selectedSession = selectedSessionId === "live" ? activeSessions[0] : sessions.find((session) => session.sessionId === selectedSessionId);
   const visibleSessions = filterSessions(sessions, sessionProviderFilter, sessionDateFilter);
+  // idle 상태(미연결/비활성)는 상단 뱃지에서 숨긴다 — 문제가 있는 provider만 나란히 노출한다.
+  const captureBadges = (["chzzk", "soop"] as const)
+    .map((provider) => ({ provider, status: frameCaptureStatusByProvider[provider] }))
+    .filter((entry): entry is { provider: ChatProvider; status: FrameCaptureStatus } => Boolean(entry.status) && entry.status?.state !== "idle");
   const selectedMemoCandidate = selectedRange
     ? buildManualCandidate({
         annotations: highlightSummary.annotations,
@@ -600,6 +617,15 @@ export function DashboardRoute() {
                   ? `${selectedSession.provider.toUpperCase()} · ${selectedSession.channelId}`
                   : "LIVE"}
             </div>
+            {captureBadges.length > 0 && (
+              <div className="capture-badges">
+                {captureBadges.map(({ provider, status }) => (
+                  <span className={`capture-badge capture-${status.state}`} key={provider} title={status.message}>
+                    {PROVIDER_LABEL[provider]} · {status.message}
+                  </span>
+                ))}
+              </div>
+            )}
             {selectedSessionId === "live" && (
               <button className="ghost-button compact-button" onClick={resetLive}>
                 <RotateCcw size={16} />
@@ -749,6 +775,7 @@ export function DashboardRoute() {
 
           {selectedRange && (
             <FramePlayerPanel
+              frameCaptureStatusByProvider={frameCaptureStatusByProvider}
               frameIndexLoaded={frameIndexLoaded}
               frameSecondsByProvider={frameSecondsByProvider}
               range={selectedRange}

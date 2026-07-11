@@ -3,6 +3,7 @@ import { mkdir, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { computeReconnectDelayMs } from "./providers/reconnectBackoff";
 import { nearestFrameSecond } from "../shared/frameSeconds";
+import { computeCaptureStatus, type FrameCaptureFailureReason, type FrameCaptureStatus } from "../shared/frameCaptureStatus";
 
 const CHZZK_USER_AGENT = "Mozilla/5.0 chzzk-multichat-overlay";
 const FRAME_HEIGHT = 720;
@@ -135,8 +136,10 @@ export class FrameCaptureManager {
   private sweepTimer: ReturnType<typeof setInterval> | undefined;
   private frameSeconds: number[] = [];
   private ffmpegMissingLogged = false;
+  private ffmpegMissing = false;
   private hlsWarningLogged = false;
   private lastError: string | undefined;
+  private lastFailureReason: FrameCaptureFailureReason | undefined;
   private lastFrameGrowthAt = Date.now();
 
   constructor(
@@ -156,6 +159,8 @@ export class FrameCaptureManager {
     this.stopped = false;
     this.channelId = channelId;
     this.restartAttempts = 0;
+    // 재연결 시 재판정 — ffmpeg를 나중에 설치한 경우 서버 재시작 없이도 캡처 가능 상태로 복귀
+    this.ffmpegMissing = false;
     this.lastFrameGrowthAt = Date.now();
     this.hlsWarningLogged = false;
     await mkdir(this.framesDir, { recursive: true });
@@ -166,6 +171,9 @@ export class FrameCaptureManager {
 
   async stop() {
     this.stopped = true;
+    // 해제 후 잔류 사유/카운터가 거짓 상태를 표시하지 않도록 클리어 (start()에서만 리셋되던 것을 보완)
+    this.lastFailureReason = undefined;
+    this.restartAttempts = 0;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = undefined;
@@ -229,6 +237,20 @@ export class FrameCaptureManager {
     };
   }
 
+  /** 내부 필드로 스냅샷을 조립해 순수 매핑 함수에 위임한다 (판정 로직·문구는 shared 단일 진실원) */
+  getCaptureStatus(): FrameCaptureStatus {
+    return computeCaptureStatus({
+      enabled: this.isEnabled(),
+      stopped: this.stopped,
+      capturing: Boolean(this.child),
+      restartScheduled: Boolean(this.restartTimer),
+      restartAttempts: this.restartAttempts,
+      frameCount: this.frameSeconds.length,
+      ffmpegMissing: this.ffmpegMissing,
+      lastFailureReason: this.lastFailureReason
+    });
+  }
+
   private async spawnCapture() {
     if (this.stopped) {
       return;
@@ -245,6 +267,7 @@ export class FrameCaptureManager {
     }
     if (!hlsUrl) {
       // DRM 채널이거나 방송 오프라인 — 백오프로 재시도하되 로그는 최초 1회만 (스팸 방지)
+      this.lastFailureReason = "no-hls";
       if (!this.hlsWarningLogged) {
         this.hlsWarningLogged = true;
         this.log("warning", "프레임 캡처: HLS 주소를 얻지 못했습니다 (DRM/오프라인 가능). 방송이 시작되면 자동으로 캡처합니다.");
@@ -300,6 +323,7 @@ export class FrameCaptureManager {
 
     child.on("error", (error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") {
+        this.ffmpegMissing = true;
         if (!this.ffmpegMissingLogged) {
           this.ffmpegMissingLogged = true;
           this.log("warning", "프레임 캡처: ffmpeg가 설치되어 있지 않아 비활성화됩니다 (brew install ffmpeg).");
@@ -307,6 +331,7 @@ export class FrameCaptureManager {
         this.stopped = true;
         return;
       }
+      this.lastFailureReason = "spawn-error";
       this.log("error", `프레임 캡처 프로세스 오류: ${error.message}`);
     });
 
@@ -315,6 +340,7 @@ export class FrameCaptureManager {
         this.child = undefined;
       }
       if (!this.stopped) {
+        this.lastFailureReason = "ffmpeg-exit";
         const detail = stderrTail.trim().split("\n").slice(-3).join(" / ");
         this.lastError = `ffmpeg 종료 (code ${code ?? "?"})${detail ? `: ${detail}` : ""}`;
         this.log("warning", `프레임 캡처가 중단되었습니다. ${this.lastError}`);
@@ -358,8 +384,9 @@ export class FrameCaptureManager {
         .filter((second) => Number.isFinite(second))
         .sort((left, right) => left - right);
       if (seconds.length > this.frameSeconds.length) {
-        // 새 프레임이 쌓이고 있으면 캡처가 살아있다는 뜻 — 백오프 리셋 + 정체 감시 타이머 리셋
+        // 새 프레임이 쌓이고 있으면 캡처가 살아있다는 뜻 — 백오프 리셋 + 정체 감시 타이머 리셋 + 사유 클리어
         this.restartAttempts = 0;
+        this.lastFailureReason = undefined;
         this.lastFrameGrowthAt = Date.now();
       }
       this.frameSeconds = seconds;

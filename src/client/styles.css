@@ -425,7 +425,7 @@ time {
   display: grid;
   align-items: center;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   min-height: 48px;
   padding: 0 14px;
   border: 1px solid rgba(226, 255, 240, 0.12);
@@ -453,6 +453,45 @@ time {
   min-height: 34px;
   padding: 0 10px;
   font-size: 13px;
+}
+
+.capture-badges {
+  display: inline-flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 캡처 상태 뱃지 — 기존 상태 팔레트(수집=녹색·재시도=앰버·문제=적색)를 재사용해 색이 곧 의미가 되게 한다 */
+.capture-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid rgba(226, 255, 240, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #cbe5d7;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.capture-badge.capture-capturing {
+  border-color: rgba(34, 229, 143, 0.4);
+  color: #22e58f;
+}
+
+.capture-badge.capture-retrying {
+  border-color: rgba(239, 184, 101, 0.4);
+  color: #efb865;
+}
+
+.capture-badge.capture-unsupported,
+.capture-badge.capture-unavailable {
+  border-color: rgba(255, 107, 125, 0.4);
+  color: #ff6b7d;
 }
 
 .metric-grid {
