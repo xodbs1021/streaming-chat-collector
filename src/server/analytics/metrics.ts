@@ -142,6 +142,17 @@ export function finalizeGlobalTops(agg: GlobalAgg): {
   };
 }
 
+export function countUniqueChatters(records: ChatRecord[]): number {
+  const ids = new Set<string>();
+  for (const record of records) {
+    const id = record.nickname.trim();
+    if (id) {
+      ids.add(id);
+    }
+  }
+  return ids.size;
+}
+
 export function participationRate(
   chatterLastSeen: Map<string, number>,
   viewerSamples: ViewerCountSample[],

@@ -15,12 +15,13 @@ import type {
   WindowComparisonSummary
 } from "../shared/types";
 import { countKeywords, tokenize } from "./analytics/text";
-import { countUnique, percentile, rankEmotes, rankTerms, round } from "./analytics/stats";
+import { percentile, rankEmotes, rankTerms, round } from "./analytics/stats";
 import {
   type WindowAgg,
   addToGlobalAgg,
   addToWindowAgg,
   averageViewerCount,
+  countUniqueChatters,
   createGlobalAgg,
   createWindowAgg,
   finalizeGlobalTops,
@@ -471,7 +472,7 @@ function buildCandidate(
     durationSec: Math.max(0, Math.round((endAt - startAt) / 1000)),
     peakCount,
     totalMessages: groupRecords.length,
-    uniqueChatters: countUnique(groupRecords.map((record) => record.nickname)),
+    uniqueChatters: countUniqueChatters(groupRecords),
     score: activeWindowMean > 0 ? round(peakCount / activeWindowMean) : 0,
     topTerms: rankTerms(groupRecords, 5),
     topEmotes: rankEmotes(groupRecords, 5),
@@ -490,7 +491,7 @@ export function computeOverallParticipationRate(records: ChatRecord[], viewerSam
   if (averageViewers === undefined || averageViewers <= 0) {
     return undefined;
   }
-  const uniqueChatters = countUnique(records.map((record) => record.nickname));
+  const uniqueChatters = countUniqueChatters(records);
   return Math.round((uniqueChatters / averageViewers) * 1000) / 1000;
 }
 

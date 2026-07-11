@@ -3,10 +3,6 @@ import { tokenize } from "./text";
 
 export const TOP_LIMIT = 8;
 
-export function countUnique(values: string[]) {
-  return new Set(values.filter(Boolean)).size;
-}
-
 export function countBy<T extends string>(records: ChatRecord[], select: (record: ChatRecord) => T) {
   const counts: Partial<Record<T, number>> = {};
   for (const record of records) {

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { LiveAnalytics, summarizeChatRecords, summarizeHighlightCandidates, summarizeWindowComparison } from "../src/server/analytics";
-import type { ChatRecord } from "../src/shared/types";
+import {
+  LiveAnalytics,
+  computeOverallParticipationRate,
+  summarizeChatRecords,
+  summarizeHighlightCandidates,
+  summarizeWindowComparison
+} from "../src/server/analytics";
+import type { ChatRecord, ViewerCountSample } from "../src/shared/types";
 
 describe("chat analytics", () => {
   it("groups messages into fixed 5 second windows", () => {
@@ -141,6 +147,23 @@ describe("chat analytics", () => {
     expect(summary.candidates[0].topTerms).toEqual(expect.arrayContaining([{ label: "펜타킬", count: 22 }]));
   });
 
+  it("merges whitespace-variant nicknames and excludes blank-only chatters in candidate stats", () => {
+    const records = [
+      makeRecord({ timestamp: 0, sequence: 1, nickname: "별", content: "한타 대박" }),
+      makeRecord({ timestamp: 1_000, sequence: 2, nickname: " 별 ", content: "한타 대박" }),
+      makeRecord({ timestamp: 2_000, sequence: 3, nickname: "  ", content: "한타 대박" }),
+      makeRecord({ timestamp: 3_000, sequence: 4, nickname: "달", content: "한타 대박" })
+    ];
+
+    const summary = summarizeHighlightCandidates(records, 5);
+
+    expect(summary.candidates).toHaveLength(1);
+    expect(summary.candidates[0]).toMatchObject({
+      totalMessages: 4,
+      uniqueChatters: 2
+    });
+  });
+
   it("compares highlight sensitivity across window sizes", () => {
     const records = [
       ...makeWindowRecords(0, 5, "초반"),
@@ -157,6 +180,25 @@ describe("chat analytics", () => {
       windowSec: 1
     });
     expect(comparison.items.some((item) => item.candidateWindowCount > 0)).toBe(true);
+  });
+});
+
+describe("computeOverallParticipationRate", () => {
+  it("counts trimmed unique chatters over average viewers, excluding blank nicknames", () => {
+    const records = [
+      makeRecord({ sequence: 1, nickname: "alice" }),
+      makeRecord({ sequence: 2, nickname: " alice " }),
+      makeRecord({ sequence: 3, nickname: "  " })
+    ];
+    const viewerSamples: ViewerCountSample[] = [{ provider: "chzzk", timestamp: 1_720_000_000_000, count: 25 }];
+
+    expect(computeOverallParticipationRate(records, viewerSamples)).toBe(0.04);
+  });
+
+  it("returns undefined when there are no viewer samples", () => {
+    const records = [makeRecord({ sequence: 1, nickname: "alice" })];
+
+    expect(computeOverallParticipationRate(records, [])).toBeUndefined();
   });
 });
 
