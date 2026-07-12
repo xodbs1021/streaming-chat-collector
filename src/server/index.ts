@@ -8,10 +8,12 @@ import { LiveAnalytics } from "./analytics";
 import { config } from "./config";
 import { ChzzkOfficialAdapter } from "./providers/chzzkOfficial";
 import { ChzzkUnofficialAdapter } from "./providers/chzzkUnofficial";
-import type { ChzzkTokenSet, ProviderAdapter } from "./providers/types";
+import type { ChzzkTokenSet, ProviderAdapter, ProviderCallbacks } from "./providers/types";
 import { SoopUnofficialAdapter } from "./providers/soopUnofficial";
 import { classifyProviderFailureReason } from "./providerDiagnostics";
 import { FrameCaptureManager, fetchChzzkHlsUrl, fetchSoopHlsUrl } from "./frameCapture";
+import { getFfmpegReadiness, probeFfmpeg } from "./ffmpegRuntime";
+import { CAPTURE_READY_TIMEOUT_MS, planFromReadiness, type CaptureReadiness } from "../shared/captureReadiness";
 import { ChatRecorder } from "./recorder";
 import { AppState, type AppSocketServer } from "./state";
 import { persistChzzkToken, readStoredChzzkToken } from "./chzzkTokenStore";
@@ -35,15 +37,19 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(app.server, {
   cors: { origin: true }
 }) as AppSocketServer;
 const recorder = new ChatRecorder(path.resolve(process.cwd(), config.chatDataDir));
+// 콜백은 "미설치로 확정되지 않았나"를 반환한다 — unknown(프로브 전)/ready는 true, 확정 미설치만 false.
+const isFfmpegNotMissing = () => getFfmpegReadiness() !== "missing";
 const frameCapture = new FrameCaptureManager(
   path.resolve(process.cwd(), config.chatDataDir, "frames", "chzzk"),
   fetchChzzkHlsUrl,
-  (level, message) => appendProviderLog({ provider: "chzzk", level, message })
+  (level, message) => appendProviderLog({ provider: "chzzk", level, message }),
+  isFfmpegNotMissing
 );
 const frameCaptureSoop = new FrameCaptureManager(
   path.resolve(process.cwd(), config.chatDataDir, "frames", "soop"),
   fetchSoopHlsUrl,
-  (level, message) => appendProviderLog({ provider: "soop", level, message })
+  (level, message) => appendProviderLog({ provider: "soop", level, message }),
+  isFfmpegNotMissing
 );
 const frameCaptureManagers = { chzzk: frameCapture, soop: frameCaptureSoop } as const;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
@@ -59,6 +65,12 @@ const state = new AppState(io, {
 });
 
 const currentAdapters = new Map<ChatProvider, ProviderAdapter>();
+// provider별 연결 세대 카운터 — 연타 재연결 시 "내 시퀀스가 최신인가"를 원리적으로 구분하는 취소 토큰.
+// 공유 stopped 플래그만으로는 새 시퀀스의 start()가 stopped를 되돌려 구 시퀀스의 폴 루프가
+// 취소 창을 놓치므로, 캡처 대기 취소·스테일 어댑터 정리를 이 카운터로 판정한다.
+const connectSeq: Record<ChatProvider, number> = { chzzk: 0, soop: 0 };
+// 캡처 선기동 동기화 킬스위치 — CAPTURE_SYNC=0이면 구 fire-and-forget 동작(채팅 먼저, 캡처 백그라운드)으로 폴백.
+const captureSyncEnabled = process.env.CAPTURE_SYNC !== "0";
 const providerLogs: ProviderDiagnosticLog[] = [];
 const chzzkTokenPath = path.resolve(process.cwd(), config.chatDataDir, ".chzzk-token.json");
 let chzzkToken: ChzzkTokenSet | undefined = await readStoredChzzkToken(chzzkTokenPath);
@@ -151,6 +163,10 @@ io.on("connection", (socket) => {
   });
 });
 
+// 부팅 워밍업 — ffmpeg 준비 상태를 1회 프로브해 캐시한다 (연결 시 매번 spawn하지 않도록).
+const ffmpegReadiness = await probeFfmpeg();
+app.log.info(`ffmpeg 준비 상태: ${ffmpegReadiness} (캡처 동기화 ${captureSyncEnabled ? "on" : "off"})`);
+
 await app.listen({ host: config.host, port: config.port });
 
 async function handleRecordedMessage(message: ChatMessage) {
@@ -172,19 +188,11 @@ async function handleRecordedMessage(message: ChatMessage) {
   }
 }
 
-async function connectProvider(request: ConnectProviderRequest) {
-  await disconnectProvider(request.provider, false);
-  appendProviderLog({
-    provider: request.provider,
-    sourceMode: request.sourceMode,
-    level: "info",
-    channelId: request.channelId,
-    message: "채팅 소스 연결을 시작했습니다."
-  });
-
-  const callbacks = {
-    onMessage: (message: Parameters<typeof state.addMessage>[0]) => state.addMessage(message),
-    onStatus: (status: Parameters<typeof state.setStatus>[0]) => {
+/** onStatus/onMessage/onViewerCount 콜백 — 어댑터가 상태·메시지·시청자 수를 앱 상태로 흘려보낸다 */
+function createProviderCallbacks(): ProviderCallbacks {
+  return {
+    onMessage: (message) => state.addMessage(message),
+    onStatus: (status) => {
       // 연결된 상태에서 offline으로 바뀌면 방송이 끝난 것 — 접속 시점의 "채널을 못 찾음" offline과
       // 구분하기 위해 "이전에 connected/reconnecting이었는가"를 기준으로 삼는다.
       const previousState = state.getStatus(status.provider).state;
@@ -202,85 +210,167 @@ async function connectProvider(request: ConnectProviderRequest) {
         void disconnectProvider(status.provider);
       }
     },
-    onViewerCount: (provider: ChatProvider, count: number) => {
+    onViewerCount: (provider, count) => {
       liveAnalytics.addViewerSample(provider, count);
       void recorder.recordViewerSample(provider, count).catch(() => undefined);
       analyticsDirty = true;
     }
   };
+}
 
-  let adapter: ProviderAdapter | undefined;
-
+/** 채팅 어댑터 생성 (soop official은 호출 전에 이미 걸러진다) */
+function buildAdapter(request: ConnectProviderRequest, callbacks: ProviderCallbacks): ProviderAdapter | undefined {
   if (request.provider === "chzzk") {
-    adapter =
-      request.sourceMode === "unofficial"
-        ? new ChzzkUnofficialAdapter(request.channelId ?? config.defaultChannelId ?? "", callbacks)
-        : new ChzzkOfficialAdapter(
-            config,
-            () => chzzkToken,
-            (token) => {
-              chzzkToken = token;
-              void persistChzzkToken(chzzkTokenPath, token);
-            },
-            callbacks
-          );
-  } else if (request.provider === "soop") {
-    if (request.sourceMode !== "unofficial") {
-      const status = {
-        provider: "soop" as const,
-        sourceMode: request.sourceMode,
-        state: "unsupported" as const,
-        channelId: request.channelId,
-        message: "SOOP은 현재 공개 채팅 수신 모드만 지원합니다."
-      };
-      state.setStatus(status);
-      appendStatusLog(status);
-      return { ok: false, error: status.message, providerStatus: status, providerStatuses: state.getStatuses() };
-    }
+    return request.sourceMode === "unofficial"
+      ? new ChzzkUnofficialAdapter(request.channelId ?? config.defaultChannelId ?? "", callbacks)
+      : new ChzzkOfficialAdapter(
+          config,
+          () => chzzkToken,
+          (token) => {
+            chzzkToken = token;
+            void persistChzzkToken(chzzkTokenPath, token);
+          },
+          callbacks
+        );
+  }
+  if (request.provider === "soop") {
+    return new SoopUnofficialAdapter(request.channelId ?? config.soopDefaultChannelId ?? "", callbacks);
+  }
+  return undefined;
+}
 
-    adapter = new SoopUnofficialAdapter(request.channelId ?? config.soopDefaultChannelId ?? "", callbacks);
+/** 캡처 선기동에 쓸 채널 id — adapter.connect 이전 시점이라 request.channelId ?? provider별 default를 쓴다 */
+function resolveFrameChannelId(request: ConnectProviderRequest): string {
+  if (request.provider === "chzzk") {
+    return request.channelId ?? config.defaultChannelId ?? "";
+  }
+  return request.channelId ?? config.soopDefaultChannelId ?? "";
+}
+
+/**
+ * 캡처를 채팅보다 먼저 기동하고 준비 상태를 최대 N초 대기한다.
+ * 비활성/미적용(킬스위치·FRAME_CAPTURE=0·채널 공백)이면 대기 없이 "disabled".
+ * 대기 중엔 connecting("이미지 준비 중...")을 노출하고, 취소 토큰(세대 카운터)으로 연타 재연결을 즉시 이탈한다 [B1].
+ */
+async function primeCaptureAndWait(request: ConnectProviderRequest, mySeq: number): Promise<CaptureReadiness> {
+  const provider = request.provider;
+  const manager = frameCaptureManagers[provider];
+  const frameChannelId = resolveFrameChannelId(request);
+  if (!captureSyncEnabled || !manager.isEnabled() || !frameChannelId) {
+    return "disabled";
+  }
+  await manager.start(frameChannelId).catch(() => undefined);
+  state.setStatus({
+    provider,
+    sourceMode: request.sourceMode,
+    state: "connecting",
+    channelId: frameChannelId,
+    message: "이미지 준비 중..."
+  });
+  return manager.waitUntilReady(CAPTURE_READY_TIMEOUT_MS, () => mySeq !== connectSeq[provider]);
+}
+
+/** 캡처 준비 판정에 경고가 있으면 진단 로그 + 연결 상태 메시지에 반영한다 (채팅은 그대로 붙은 상태) */
+function applyCaptureWarning(warning: string | undefined, request: ConnectProviderRequest) {
+  if (!warning) {
+    return;
+  }
+  appendProviderLog({ provider: request.provider, sourceMode: request.sourceMode, level: "warning", message: warning });
+  const connected = state.getStatus(request.provider);
+  state.setStatus({ ...connected, message: warning });
+}
+
+const cancelledConnectResult = () => ({
+  ok: false as const,
+  error: "연결이 취소되었습니다.",
+  providerStatuses: state.getStatuses()
+});
+
+async function connectProvider(request: ConnectProviderRequest) {
+  const provider = request.provider;
+  const mySeq = ++connectSeq[provider];
+  await disconnectProvider(provider, false);
+  appendProviderLog({
+    provider,
+    sourceMode: request.sourceMode,
+    level: "info",
+    channelId: request.channelId,
+    message: "채팅 소스 연결을 시작했습니다."
+  });
+
+  if (provider === "soop" && request.sourceMode !== "unofficial") {
+    const status = {
+      provider: "soop" as const,
+      sourceMode: request.sourceMode,
+      state: "unsupported" as const,
+      channelId: request.channelId,
+      message: "SOOP은 현재 공개 채팅 수신 모드만 지원합니다."
+    };
+    state.setStatus(status);
+    appendStatusLog(status);
+    return { ok: false, error: status.message, providerStatus: status, providerStatuses: state.getStatuses() };
   }
 
+  // 캡처 선기동 → 준비 대기 → 채팅 시작 여부 판정 (시퀀스 뒤집기의 핵심)
+  const readiness = await primeCaptureAndWait(request, mySeq);
+  if (mySeq !== connectSeq[provider]) {
+    return cancelledConnectResult();
+  }
+  const plan = planFromReadiness(readiness);
+  if (!plan.startChat) {
+    return cancelledConnectResult();
+  }
+
+  const adapter = buildAdapter(request, createProviderCallbacks());
   if (!adapter) {
     return { ok: false, error: "지원하지 않는 provider입니다." };
   }
-
-  currentAdapters.set(request.provider, adapter);
+  currentAdapters.set(provider, adapter);
 
   try {
     await adapter.connect();
+    // 연결 도중 새 시퀀스가 진입했으면 이 어댑터는 고아 — 정리하고 중단 (currentAdapters는 새 시퀀스 소유이므로 덮어쓰지 않는다)
+    if (mySeq !== connectSeq[provider]) {
+      await adapter.disconnect().catch(() => undefined);
+      if (currentAdapters.get(provider) === adapter) {
+        currentAdapters.delete(provider);
+      }
+      return cancelledConnectResult();
+    }
     const resultState = adapter.getStatus().state;
     const isFailureState = ["error", "unsupported", "auth_required", "offline"].includes(resultState);
-    if (!isFailureState) {
+    if (isFailureState) {
+      // 채팅이 안 붙었으면 선기동한 캡처는 고아 — 정리 (no-hls 백오프도 함께 멈춤)
+      await frameCaptureManagers[provider].stop();
+    } else {
       appendProviderLog({
-        provider: request.provider,
+        provider,
         sourceMode: request.sourceMode,
         level: "success",
         channelId: adapter.getStatus().channelId ?? request.channelId,
         message: "채팅 소스 연결이 완료되었습니다."
       });
-      if (request.provider === "chzzk") {
-        const frameChannelId = adapter.getStatus().channelId ?? request.channelId ?? config.defaultChannelId ?? "";
-        void frameCapture.start(frameChannelId).catch(() => undefined);
-      } else if (request.provider === "soop") {
-        const frameChannelId = adapter.getStatus().channelId ?? request.channelId ?? config.soopDefaultChannelId ?? "";
-        void frameCaptureSoop.start(frameChannelId).catch(() => undefined);
+      applyCaptureWarning(plan.warning, request);
+      // 킬스위치: 동기화 off일 땐 구 동작(채팅 먼저 → 캡처 백그라운드 fire-and-forget)으로 폴백
+      if (!captureSyncEnabled) {
+        const fallbackDefault = provider === "chzzk" ? config.defaultChannelId : config.soopDefaultChannelId;
+        const frameChannelId = adapter.getStatus().channelId ?? request.channelId ?? fallbackDefault ?? "";
+        void frameCaptureManagers[provider].start(frameChannelId).catch(() => undefined);
       }
     }
     return { ok: !isFailureState, providerStatus: adapter.getStatus(), providerStatuses: state.getStatuses() };
   } catch (error) {
     app.log.error(
-      {
-        err: error,
-        provider: request.provider,
-        sourceMode: request.sourceMode,
-        channelId: request.channelId
-      },
+      { err: error, provider, sourceMode: request.sourceMode, channelId: request.channelId },
       "채팅 소스 연결 중 오류가 발생했습니다."
     );
-    currentAdapters.delete(request.provider);
+    currentAdapters.delete(provider);
+    // 연결 실패 → 선기동한 캡처 정리 (스테일이면 새 시퀀스 소유이므로 건드리지 않는다)
+    if (mySeq === connectSeq[provider]) {
+      await frameCaptureManagers[provider].stop();
+    }
     const status = {
-      provider: request.provider,
+      provider,
       sourceMode: request.sourceMode,
       state: "error" as const,
       channelId: request.channelId,

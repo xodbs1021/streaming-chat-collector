@@ -3,7 +3,8 @@ import { mkdir, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { computeReconnectDelayMs } from "./providers/reconnectBackoff";
 import { nearestFrameSecond } from "../shared/frameSeconds";
-import { computeCaptureStatus, type FrameCaptureFailureReason, type FrameCaptureStatus } from "../shared/frameCaptureStatus";
+import { computeCaptureStatus, type FrameCaptureFailureReason, type FrameCaptureStatus, type FrameCaptureSnapshot } from "../shared/frameCaptureStatus";
+import { classifyReadiness, CAPTURE_READY_POLL_MS, type CaptureReadiness } from "../shared/captureReadiness";
 
 const CHZZK_USER_AGENT = "Mozilla/5.0 chzzk-multichat-overlay";
 const FRAME_HEIGHT = 720;
@@ -145,7 +146,10 @@ export class FrameCaptureManager {
   constructor(
     private readonly framesDir: string,
     private readonly resolveHlsUrl: HlsUrlResolver,
-    private readonly log: FrameCaptureLogger
+    private readonly log: FrameCaptureLogger,
+    // 부팅 프로브 결과 주입 — "known missing"이면 spawn 없이 즉시 프라이밍한다.
+    // 콜백은 "미설치로 확정되지 않았나"(unknown/ready→true)를 반환하므로, false는 확정 미설치만을 뜻한다.
+    private readonly isFfmpegReady?: () => boolean
   ) {}
 
   isEnabled() {
@@ -163,10 +167,33 @@ export class FrameCaptureManager {
     this.ffmpegMissing = false;
     this.lastFrameGrowthAt = Date.now();
     this.hlsWarningLogged = false;
+    // 부팅 프로브가 미설치로 확정한 경우 spawn을 시도하지 않고 즉시 판정 (unknown은 런타임 ENOENT 폴백 유지)
+    if (this.isFfmpegReady && !this.isFfmpegReady()) {
+      this.ffmpegMissing = true;
+    }
     await mkdir(this.framesDir, { recursive: true });
     this.startIndexPolling();
     this.startRetentionSweep();
     await this.spawnCapture();
+  }
+
+  /**
+   * 캡처 기동이 채팅과 동시 시작할 준비가 되었는지 100ms 간격으로 폴한다.
+   * 매 tick 취소 콜백을 우선 확인해(연타 재연결 시 스테일 시퀀스가 새 child를 ready로 오인하는 것 방지),
+   * 그다음 순수 판정에 위임한다. pending이 아니면 즉시 반환하므로 정상 방송은 첫 tick에 해소된다.
+   */
+  async waitUntilReady(timeoutMs: number, isCancelled?: () => boolean): Promise<CaptureReadiness> {
+    const startedAt = Date.now();
+    for (;;) {
+      if (isCancelled?.()) {
+        return "cancelled";
+      }
+      const verdict = classifyReadiness(this.buildSnapshot(), Date.now() - startedAt, timeoutMs);
+      if (verdict !== "pending") {
+        return verdict;
+      }
+      await new Promise((resolve) => setTimeout(resolve, CAPTURE_READY_POLL_MS));
+    }
   }
 
   async stop() {
@@ -237,9 +264,9 @@ export class FrameCaptureManager {
     };
   }
 
-  /** 내부 필드로 스냅샷을 조립해 순수 매핑 함수에 위임한다 (판정 로직·문구는 shared 단일 진실원) */
-  getCaptureStatus(): FrameCaptureStatus {
-    return computeCaptureStatus({
+  /** 내부 필드로 순수 판정 함수들이 소비할 스냅샷을 조립한다 (getCaptureStatus·waitUntilReady 공유) */
+  private buildSnapshot(): FrameCaptureSnapshot {
+    return {
       enabled: this.isEnabled(),
       stopped: this.stopped,
       capturing: Boolean(this.child),
@@ -248,7 +275,12 @@ export class FrameCaptureManager {
       frameCount: this.frameSeconds.length,
       ffmpegMissing: this.ffmpegMissing,
       lastFailureReason: this.lastFailureReason
-    });
+    };
+  }
+
+  /** 스냅샷을 순수 매핑 함수에 위임한다 (판정 로직·문구는 shared 단일 진실원) */
+  getCaptureStatus(): FrameCaptureStatus {
+    return computeCaptureStatus(this.buildSnapshot());
   }
 
   private async spawnCapture() {
