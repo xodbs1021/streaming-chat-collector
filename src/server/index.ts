@@ -12,6 +12,7 @@ import type { ChzzkTokenSet, ProviderAdapter, ProviderCallbacks } from "./provid
 import { SoopUnofficialAdapter } from "./providers/soopUnofficial";
 import { classifyProviderFailureReason } from "./providerDiagnostics";
 import { FrameCaptureManager, fetchChzzkHlsUrl, fetchSoopHlsUrl } from "./frameCapture";
+import { resolveFrameChannelInput } from "./frameChannel";
 import { getFfmpegReadiness, probeFfmpeg } from "./ffmpegRuntime";
 import { CAPTURE_READY_TIMEOUT_MS, planFromReadiness, type CaptureReadiness } from "../shared/captureReadiness";
 import { ChatRecorder } from "./recorder";
@@ -241,10 +242,12 @@ function buildAdapter(request: ConnectProviderRequest, callbacks: ProviderCallba
 
 /** 캡처 선기동에 쓸 채널 id — adapter.connect 이전 시점이라 request.channelId ?? provider별 default를 쓴다 */
 function resolveFrameChannelId(request: ConnectProviderRequest): string {
-  if (request.provider === "chzzk") {
-    return request.channelId ?? config.defaultChannelId ?? "";
-  }
-  return request.channelId ?? config.soopDefaultChannelId ?? "";
+  const raw =
+    request.provider === "chzzk"
+      ? (request.channelId ?? config.defaultChannelId ?? "")
+      : (request.channelId ?? config.soopDefaultChannelId ?? "");
+  // 입력창에는 라이브 URL도 들어온다 — 어댑터와 같은 파서로 정규화하지 않으면 HLS 조회가 URL로 나가 실패한다
+  return resolveFrameChannelInput(request.provider, raw) ?? "";
 }
 
 /**
