@@ -23,3 +23,4 @@
 | 2026-07-08 | plan-reviewer, completion-auditor 추가 (9 에이전트 + 9 스킬) | agents/, skills/, chat-harness | 계획 검증 루프 + 완료 주장 감사 게이트 요청 |
 | 2026-07-08 | architecture-guide 추가 (10 에이전트 + 10 스킬) | agents/, skills/, chat-harness | "왜 이 구조로 짰나" 설계 의도 설명·교육 자문 에이전트 요청 |
 | 2026-07-10 | 완료검증 훅 강제 (settings.json + hooks/ 4스크립트) | .claude/ | 감사자가 산문으로만 존재해 생략 가능 → Stop/PostToolUse/PreToolUse 훅으로 강제. 타입체크·감사 미실행 시 턴 종료 차단, master 커밋 차단 |
+| 2026-07-12 | completion-auditor에 "운영 반영 여부" 감사 기준 추가 | agents/completion-auditor.md | 코드 완료(머지·테스트)만 검증하고 운영 서버(dist 빌드본) 반영을 안 봐서, 사용자가 옛 빌드 화면을 보며 "그대로"라고 항의한 실사고 재발 방지 |
