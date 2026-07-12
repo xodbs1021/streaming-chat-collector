@@ -1674,6 +1674,29 @@ time {
   background: #ffffff;
 }
 
+/* 캡처 뱃지 상태색은 다크 전용 밝은 톤이라 흰 배경에서 1.7~2.7:1로 묻힘 — 같은 의미의 어두운 톤으로 오버라이드 */
+:root[data-theme="light"] .capture-badge {
+  border-color: rgba(18, 56, 38, 0.18);
+  background: rgba(18, 56, 38, 0.04);
+  color: #33473c;
+}
+
+:root[data-theme="light"] .capture-badge.capture-capturing {
+  border-color: rgba(12, 154, 88, 0.45);
+  color: #0b6b40;
+}
+
+:root[data-theme="light"] .capture-badge.capture-retrying {
+  border-color: rgba(138, 90, 0, 0.45);
+  color: #8a5a00;
+}
+
+:root[data-theme="light"] .capture-badge.capture-unsupported,
+:root[data-theme="light"] .capture-badge.capture-unavailable {
+  border-color: rgba(194, 39, 58, 0.4);
+  color: #c2273a;
+}
+
 :root[data-theme="light"] .metric-tile svg {
   color: #0c9a58;
 }
