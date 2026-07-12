@@ -1942,7 +1942,8 @@ time {
 :root[data-theme="light"] .provider-status-card p,
 :root[data-theme="light"] .provider-status-card small,
 :root[data-theme="light"] .provider-log-row p,
-:root[data-theme="light"] .provider-log-row small {
+:root[data-theme="light"] .provider-log-row small,
+:root[data-theme="light"] .provider-log-row time {
   color: #4c6558;
 }
 
