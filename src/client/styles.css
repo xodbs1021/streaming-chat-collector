@@ -1927,6 +1927,17 @@ time {
   background: rgba(18, 56, 38, 0.06);
 }
 
+/* 슬라이더 값·토글 라벨은 다크 전용 밝은 색이라 라이트에서 배경에 묻힘 — 명시 오버라이드 필수 */
+:root[data-theme="light"] .range-field output {
+  color: #123826;
+}
+
+:root[data-theme="light"] .toggle {
+  border-color: rgba(18, 56, 38, 0.16);
+  background: rgba(18, 56, 38, 0.04);
+  color: #123826;
+}
+
 :root[data-theme="light"] .saved-memo-row span,
 :root[data-theme="light"] .rank-row strong,
 :root[data-theme="light"] .comparison-card em,
