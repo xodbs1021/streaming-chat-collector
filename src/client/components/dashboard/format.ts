@@ -104,3 +104,23 @@ export function formatTime(timestamp: number) {
 export function formatWindowRange(window: AnalyticsWindow) {
   return `${formatTime(window.windowStart)} ~ ${formatTime(window.windowEnd)}`;
 }
+
+// 프레임 파일명(에폭 초)은 매칭·보존·API의 키라 불변 — 사람이 읽는 시각은 표시 계층에서만 변환한다.
+// 브라우저 로컬 TZ와 무관하게 항상 KST. hourCycle:"h23"은 hour12:false 단독 시 h24(24:00) 매핑 사례 회피.
+const FRAME_TS_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Seoul",
+  hourCycle: "h23",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit"
+});
+
+/** 에폭 초 → "2026.07.11 17:02:03" (KST) */
+export function formatFrameTimestamp(epochSec: number): string {
+  const parts = FRAME_TS_FMT.formatToParts(epochSec * 1000);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}.${get("month")}.${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
+}

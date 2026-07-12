@@ -4,7 +4,7 @@ import type { AnalyticsWindow, ChatProvider } from "../../../shared/types";
 import type { FrameCaptureStatus } from "../../../shared/frameCaptureStatus";
 import { dominantProvider, filterAvailableSeconds, otherProvider, resolveAvailableFrames, sumProviderCounts } from "../../frameProviderSelection";
 import { FRAME_PLAYBACK_INTERVAL_MS, PROVIDER_LABEL, type TimelineSelection } from "./constants";
-import { formatTime, frameSecondsForRange } from "./format";
+import { formatFrameTimestamp, formatTime, frameSecondsForRange } from "./format";
 import { FramePreview } from "./FramePreview";
 
 /** 선택된 구간을 크게 자동재생 — 호버 미리보기와 별개로, 클릭해서 고른 구간을 명확히 확인하기 위한 패널 */
@@ -93,6 +93,9 @@ export function FramePlayerPanel({
       {second !== undefined ? (
         <>
           <FramePreview key={`${activeProvider}-${second}`} large provider={activeProvider} second={second} />
+          <time className="frame-timestamp" dateTime={new Date(second * 1000).toISOString()}>
+            {formatFrameTimestamp(second)}
+          </time>
           <div className="frame-player-scrubber">
             {seconds.map((s, index) => (
               <span className={index === activeIndex ? "active" : ""} key={s} />
