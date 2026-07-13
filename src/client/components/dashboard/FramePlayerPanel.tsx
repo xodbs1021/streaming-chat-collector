@@ -96,11 +96,10 @@ export function FramePlayerPanel({
           <time className="frame-timestamp" dateTime={new Date(second * 1000).toISOString()}>
             {formatFrameTimestamp(second)}
           </time>
-          <div className="frame-player-scrubber">
-            {seconds.map((s, index) => (
-              <span className={index === activeIndex ? "active" : ""} key={s} />
-            ))}
-          </div>
+          {/* 사진 1장당 점 1개는 구간이 크면 수백 개로 늘어나 UI를 늘려버린다 → 고정 크기 요약 텍스트로 대체 */}
+          <p className="frame-player-summary">
+            {formatFrameTimestamp(seconds[0])} ~ {formatFrameTimestamp(seconds[seconds.length - 1])} · 총 {seconds.length}장
+          </p>
         </>
       ) : (
         <div className="empty-state compact-empty">이 구간의 캡처된 화면이 없습니다.{captureReason ? ` (${captureReason})` : ""}</div>
