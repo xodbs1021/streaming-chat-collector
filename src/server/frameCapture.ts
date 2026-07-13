@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { computeReconnectDelayMs } from "./providers/reconnectBackoff";
+import { JpegStreamParser } from "./frameJpegStream";
+import { FrameSecondAssigner } from "./frameSecondAssigner";
 import { nearestFrameSecond } from "../shared/frameSeconds";
 import { computeCaptureStatus, type FrameCaptureFailureReason, type FrameCaptureStatus, type FrameCaptureSnapshot } from "../shared/frameCaptureStatus";
 import { classifyReadiness, CAPTURE_READY_POLL_MS, type CaptureReadiness } from "../shared/captureReadiness";
@@ -26,7 +28,6 @@ export { nearestFrameSecond };
 
 export interface FfmpegArgsParams {
   hlsUrl: string;
-  framesDir: string;
   fps: number;
   height: number;
   jpegQuality: number;
@@ -34,8 +35,10 @@ export interface FfmpegArgsParams {
 
 /**
  * ffmpeg 캡처 인자를 조립한다 (순수 함수 — spawn 부수효과 없음).
- * `-re`로 입력을 native rate로 페이싱해, image2 muxer의 벽시계-초 파일명(`%s.jpg`)이
- * 버스트 write로 같은 초에 충돌·유실되는 것을 막는다. 파일명 스킴은 불변.
+ * MJPEG 프레임을 파일이 아니라 stdout(`pipe:1`)으로 흘려보내, 명명 주체를
+ * ffmpeg(-strftime)에서 Node로 옮긴다. Node가 파이프 순서대로 각 프레임에 진짜 초를
+ * 부여하므로 벽시계-초 파일명 충돌(버스트 덮어쓰기)이 물리적으로 불가능해진다.
+ * `-re`는 입력을 native rate로 페이싱해 프레임 유입을 realtime에 맞춘다. 파일명 스킴(`<초>.jpg`)은 불변.
  */
 export function buildFfmpegArgs(params: FfmpegArgsParams): string[] {
   return [
@@ -65,10 +68,10 @@ export function buildFfmpegArgs(params: FfmpegArgsParams): string[] {
     "-q:v",
     String(params.jpegQuality),
     "-f",
-    "image2",
-    "-strftime",
-    "1",
-    path.join(params.framesDir, "%s.jpg")
+    "image2pipe",
+    "-c:v",
+    "mjpeg",
+    "pipe:1"
   ];
 }
 
@@ -190,6 +193,9 @@ export class FrameCaptureManager {
   private lastError: string | undefined;
   private lastFailureReason: FrameCaptureFailureReason | undefined;
   private lastFrameGrowthAt = Date.now();
+  // 프레임 명명·갭필 정책기. lastFrameSec/lastFrameBuffer를 spawn 경계 너머로 유지해
+  // 재접속 짧은 공백을 메우므로 매니저 수명 내내 단일 인스턴스를 재사용한다.
+  private readonly assigner = new FrameSecondAssigner();
 
   constructor(
     private readonly framesDir: string,
@@ -299,6 +305,30 @@ export class FrameCaptureManager {
     return path.join(this.framesDir, `${second}.jpg`);
   }
 
+  /**
+   * 완성 프레임 한 장을 진짜 초로 명명해 디스크에 쓴다. 갭필 초는 직전 프레임을 복제한다.
+   * 인메모리 즉시 배정(동기) + 디스크 쓰기(비동기, 실패해도 캡처 지속)로 분리한다.
+   */
+  private ingestFrame(frame: Buffer) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    // assign이 lastFrameBuffer를 갱신하기 전에 갭필 복제 소스(직전 실 프레임)를 잡아둔다.
+    const fillSource = this.assigner.getLastFrameBuffer();
+    const { second, fills } = this.assigner.assign(nowSec, frame);
+    this.writeFrameFile(second, frame);
+    if (fillSource) {
+      for (const fillSecond of fills) {
+        this.writeFrameFile(fillSecond, fillSource);
+      }
+    }
+  }
+
+  /** 프레임 바이트를 `<초>.jpg`로 비동기 저장한다. 실패는 로그만 남기고 삼키지 않는다(캡처 크래시 금지). */
+  private writeFrameFile(second: number, data: Buffer) {
+    void writeFile(this.framePath(second), data).catch((error: unknown) => {
+      this.log("warning", `프레임 저장 실패 (${second}.jpg): ${error instanceof Error ? error.message : "unknown"}`);
+    });
+  }
+
   getDebugState() {
     return {
       enabled: this.isEnabled(),
@@ -364,7 +394,6 @@ export class FrameCaptureManager {
       "ffmpeg",
       buildFfmpegArgs({
         hlsUrl,
-        framesDir: this.framesDir,
         fps: FRAME_FPS,
         height: FRAME_HEIGHT,
         jpegQuality: FRAME_JPEG_QUALITY
@@ -373,6 +402,16 @@ export class FrameCaptureManager {
     );
     this.child = child;
     this.lastFrameGrowthAt = Date.now();
+
+    // ffmpeg가 파이프로 흘리는 MJPEG 바이트를 프레임 경계로 재조립해, 도착 순서대로
+    // 진짜 초를 부여하고 디스크에 쓴다. 파서는 spawn마다 새로 만들어 죽은 프로세스의
+    // 미완성 잔여가 새 프로세스로 넘어가지 않게 한다.
+    const parser = new JpegStreamParser();
+    child.stdout?.on("data", (chunk: Buffer) => {
+      for (const frame of parser.push(chunk)) {
+        this.ingestFrame(frame);
+      }
+    });
 
     let stderrTail = "";
     child.stderr?.on("data", (chunk: Buffer) => {
@@ -397,6 +436,9 @@ export class FrameCaptureManager {
       if (this.child === child) {
         this.child = undefined;
       }
+      // spawn 경계 리셋 — 다음 프로세스의 첫 프레임이 새 기준점을 잡되, lastFrameSec/
+      // lastFrameBuffer는 재접속 갭필용으로 유지된다.
+      this.assigner.resetSpawn();
       if (!this.stopped) {
         this.lastFailureReason = "ffmpeg-exit";
         const detail = stderrTail.trim().split("\n").slice(-3).join(" / ");

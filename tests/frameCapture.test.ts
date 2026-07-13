@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildFfmpegArgs, extractHlsUrl, findHlsUrlDeep, nearestFrameSecond } from "../src/server/frameCapture";
 
 describe("buildFfmpegArgs", () => {
-  const params = { hlsUrl: "https://cdn.example.com/live/index.m3u8?token=abc", framesDir: "/tmp/frames", fps: 1, height: 720, jpegQuality: 5 };
+  const params = { hlsUrl: "https://cdn.example.com/live/index.m3u8?token=abc", fps: 1, height: 720, jpegQuality: 5 };
 
   it("includes -re for input pacing before the -i input flag", () => {
     const args = buildFfmpegArgs(params);
@@ -12,16 +12,20 @@ describe("buildFfmpegArgs", () => {
     expect(reIndex).toBeLessThan(inputIndex);
   });
 
-  it("keeps the fps/scale, quality and strftime settings", () => {
+  it("keeps the fps/scale and quality settings", () => {
     const args = buildFfmpegArgs(params);
     expect(args[args.indexOf("-vf") + 1]).toBe("fps=1,scale=-2:720");
     expect(args[args.indexOf("-q:v") + 1]).toBe("5");
-    expect(args[args.indexOf("-strftime") + 1]).toBe("1");
   });
 
-  it("keeps the %s.jpg output filename scheme unchanged", () => {
+  it("streams mjpeg frames to stdout instead of writing strftime-named files", () => {
     const args = buildFfmpegArgs(params);
-    expect(args[args.length - 1].endsWith("%s.jpg")).toBe(true);
+    // 명명 주체를 ffmpeg에서 Node로 옮겼다 — strftime/%s.jpg는 제거되고 파이프로 전환.
+    expect(args).not.toContain("-strftime");
+    expect(args.some((arg) => arg.includes("%s.jpg"))).toBe(false);
+    expect(args[args.indexOf("-f") + 1]).toBe("image2pipe");
+    expect(args[args.indexOf("-c:v") + 1]).toBe("mjpeg");
+    expect(args[args.length - 1]).toBe("pipe:1");
   });
 
   it("passes the HLS URL through untouched", () => {
