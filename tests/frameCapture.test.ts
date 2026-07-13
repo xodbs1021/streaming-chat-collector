@@ -1,5 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { extractHlsUrl, findHlsUrlDeep, nearestFrameSecond } from "../src/server/frameCapture";
+import { buildFfmpegArgs, extractHlsUrl, findHlsUrlDeep, nearestFrameSecond } from "../src/server/frameCapture";
+
+describe("buildFfmpegArgs", () => {
+  const params = { hlsUrl: "https://cdn.example.com/live/index.m3u8?token=abc", framesDir: "/tmp/frames", fps: 1, height: 720, jpegQuality: 5 };
+
+  it("includes -re for input pacing before the -i input flag", () => {
+    const args = buildFfmpegArgs(params);
+    const reIndex = args.indexOf("-re");
+    const inputIndex = args.indexOf("-i");
+    expect(reIndex).toBeGreaterThanOrEqual(0);
+    expect(reIndex).toBeLessThan(inputIndex);
+  });
+
+  it("keeps the fps/scale, quality and strftime settings", () => {
+    const args = buildFfmpegArgs(params);
+    expect(args[args.indexOf("-vf") + 1]).toBe("fps=1,scale=-2:720");
+    expect(args[args.indexOf("-q:v") + 1]).toBe("5");
+    expect(args[args.indexOf("-strftime") + 1]).toBe("1");
+  });
+
+  it("keeps the %s.jpg output filename scheme unchanged", () => {
+    const args = buildFfmpegArgs(params);
+    expect(args[args.length - 1].endsWith("%s.jpg")).toBe(true);
+  });
+
+  it("passes the HLS URL through untouched", () => {
+    const args = buildFfmpegArgs(params);
+    expect(args[args.indexOf("-i") + 1]).toBe(params.hlsUrl);
+  });
+});
 
 describe("frame capture helpers", () => {
   it("extracts the HLS media path from livePlaybackJson", () => {
