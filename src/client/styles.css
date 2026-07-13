@@ -314,10 +314,6 @@ time {
   background: rgba(255, 255, 255, 0.055);
 }
 
-.test-panel {
-  grid-column: 1 / -1;
-}
-
 .provider-log-panel {
   grid-column: 1 / -1;
 }
@@ -2009,9 +2005,7 @@ time {
   color: #0c7a48;
 }
 
-:root[data-theme="light"] .field input,
-:root[data-theme="light"] .test-panel input,
-:root[data-theme="light"] .test-panel textarea {
+:root[data-theme="light"] .field input {
   border-color: rgba(18, 56, 38, 0.22);
   background: #ffffff;
   color: #16281f;

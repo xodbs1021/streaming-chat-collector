@@ -164,10 +164,6 @@ io.on("connection", (socket) => {
     applySettingsPatch(patch);
   });
 
-  socket.on("test:message", (content) => {
-    state.addTestMessage(content);
-  });
-
   socket.on("provider:connect", (request) => {
     void connectProvider(request).catch((error) => {
       state.setStatus({

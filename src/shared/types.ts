@@ -286,11 +286,6 @@ export interface DisconnectProviderRequest {
   provider?: ChatProvider;
 }
 
-export interface TestMessageRequest {
-  content?: string;
-  provider?: ChatProvider;
-}
-
 export interface HealthResponse {
   ok: boolean;
   uptimeSec: number;
@@ -313,5 +308,4 @@ export interface ClientToServerEvents {
   "provider:connect": (request: ConnectProviderRequest) => void;
   "provider:disconnect": (request?: DisconnectProviderRequest) => void;
   "settings:update": (settings: Partial<OverlaySettings>) => void;
-  "test:message": (request?: string | TestMessageRequest) => void;
 }

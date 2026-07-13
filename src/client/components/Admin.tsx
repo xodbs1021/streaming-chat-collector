@@ -1,5 +1,5 @@
-import { CheckCircle2, FlaskConical, LogIn, MonitorPlay, Plug, Power, RadioTower, Send, Settings2, Wifi } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { CheckCircle2, FlaskConical, LogIn, MonitorPlay, Plug, Power, RadioTower, Settings2, Wifi } from "lucide-react";
+import { useEffect, useState } from "react";
 import { CAPTURE_QUALITIES } from "../../shared/types";
 import type { CaptureQuality, ChatProvider, OverlaySettings, ProviderDiagnosticLog, ProviderStatus, ProviderStatusMap, SourceMode } from "../../shared/types";
 import { useRealtime } from "../hooks/useRealtime";
@@ -9,7 +9,6 @@ export function AdminRoute() {
   const [provider, setProvider] = useState<ChatProvider>("chzzk");
   const [sourceMode, setSourceMode] = useState<SourceMode>("official");
   const [channelId, setChannelId] = useState("");
-  const [testMessage, setTestMessage] = useState("");
   const [providerLogs, setProviderLogs] = useState<ProviderDiagnosticLog[]>([]);
   const [localSettings, setLocalSettings] = useState<OverlaySettings>(settings);
   const authNotice = readAuthNotice();
@@ -60,12 +59,6 @@ export function AdminRoute() {
   function selectProvider(nextProvider: ChatProvider) {
     setProvider(nextProvider);
     setSourceMode(nextProvider === "soop" ? "unofficial" : "official");
-  }
-
-  function sendTestMessage(event: FormEvent) {
-    event.preventDefault();
-    socket.emit("test:message", { content: testMessage, provider });
-    setTestMessage("");
   }
 
   function updateSettings(patch: Partial<OverlaySettings>) {
@@ -264,21 +257,6 @@ export function AdminRoute() {
             />
           </div>
         </div>
-
-        <form className="panel test-panel" onSubmit={sendTestMessage}>
-          <div className="panel-title">
-            <Send size={20} />
-            <h2>테스트 메시지</h2>
-          </div>
-          <label className="field">
-            <span>내용</span>
-            <input value={testMessage} onChange={(event) => setTestMessage(event.target.value)} placeholder="오버레이 테스트 메시지" />
-          </label>
-          <button className="primary-button" type="submit">
-            <Send size={18} />
-            보내기
-          </button>
-        </form>
 
         <ProviderLogPanel logs={providerLogs} />
       </section>

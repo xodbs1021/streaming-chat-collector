@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { Server } from "socket.io";
 import { defaultSettings, normalizeSettings } from "../shared/settings";
 import type {
@@ -67,26 +66,6 @@ export class AppState {
     this.trimMessages();
     this.io.emit("chat:message", message);
     this.hooks.onMessage?.(message);
-  }
-
-  addTestMessage(input?: string | { content?: string; provider?: ChatProvider }) {
-    const content = typeof input === "string" ? input : input?.content;
-    const provider = typeof input === "string" ? this.getStatus().provider : input?.provider ?? this.getStatus().provider;
-    const message: ChatMessage = {
-      provider,
-      sourceMode: "mock",
-      channelId: "local-test",
-      messageId: `test-${randomUUID()}`,
-      nickname: randomNickname(),
-      role: "viewer",
-      badges: [{ id: "test", label: "TEST" }],
-      content: content?.trim() || randomContent(),
-      emotes: [],
-      timestamp: Date.now(),
-      raw: { test: true }
-    };
-    this.addMessage(message);
-    return message;
   }
 
   getStatus(provider?: ChatProvider) {
@@ -167,20 +146,4 @@ function buildIdleStatus(provider: ChatProvider): ProviderStatus {
     state: "idle",
     message: provider === "soop" ? "SOOP 연결 대기 중" : "치지직 연결 대기 중"
   };
-}
-
-function randomNickname() {
-  const names = ["초록별", "방송친구", "채팅요정", "나이스샷", "집중모드", "첫줄장인"];
-  return names[Math.floor(Math.random() * names.length)];
-}
-
-function randomContent() {
-  const messages = [
-    "오늘 화면 깔끔하다!",
-    "채팅 연결 테스트 메시지입니다.",
-    "OBS 오버레이 잘 보이는지 확인 중",
-    "긴 메시지도 잘 줄바꿈 되는지 확인해보는 테스트 채팅입니다. 폰트와 카드 폭을 봐주세요.",
-    "ㅋㅋㅋㅋㅋ"
-  ];
-  return messages[Math.floor(Math.random() * messages.length)];
 }
