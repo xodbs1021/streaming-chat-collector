@@ -24,6 +24,54 @@ export interface FrameCaptureLogger {
 
 export { nearestFrameSecond };
 
+export interface FfmpegArgsParams {
+  hlsUrl: string;
+  framesDir: string;
+  fps: number;
+  height: number;
+  jpegQuality: number;
+}
+
+/**
+ * ffmpeg 캡처 인자를 조립한다 (순수 함수 — spawn 부수효과 없음).
+ * `-re`로 입력을 native rate로 페이싱해, image2 muxer의 벽시계-초 파일명(`%s.jpg`)이
+ * 버스트 write로 같은 초에 충돌·유실되는 것을 막는다. 파일명 스킴은 불변.
+ */
+export function buildFfmpegArgs(params: FfmpegArgsParams): string[] {
+  return [
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    // 이 CDN의 fMP4 세그먼트가 .m4v 확장자를 쓰는데, ffmpeg hls 디먹서의 기본
+    // 엄격 확장자 검사(extension_picky)가 이를 거부해 "Invalid data found"로
+    // 실패했다 (실측 확인: extension_picky 끄면 정상 캡처됨).
+    "-extension_picky",
+    "0",
+    "-reconnect",
+    "1",
+    "-reconnect_streamed",
+    "1",
+    "-reconnect_at_eof",
+    "1",
+    "-reconnect_delay_max",
+    "5",
+    // 입력을 native rate(라이브=realtime)로 읽어 파이프라인을 페이싱한다.
+    // 입력 옵션이므로 반드시 -i 앞에 와야 한다.
+    "-re",
+    "-i",
+    params.hlsUrl,
+    "-vf",
+    `fps=${params.fps},scale=-2:${params.height}`,
+    "-q:v",
+    String(params.jpegQuality),
+    "-f",
+    "image2",
+    "-strftime",
+    "1",
+    path.join(params.framesDir, "%s.jpg")
+  ];
+}
+
 /** livePlaybackJson 문자열에서 HLS 스트림 주소를 뽑는다 */
 export function extractHlsUrl(livePlaybackJson: string): string | undefined {
   try {
@@ -314,35 +362,13 @@ export class FrameCaptureManager {
     // 커스텀 헤더는 불필요해서 뺐고, 대신 HTTP 재연결 옵션으로 짧은 세그먼트 만료 경합에 대비한다.
     const child = spawn(
       "ffmpeg",
-      [
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        // 이 CDN의 fMP4 세그먼트가 .m4v 확장자를 쓰는데, ffmpeg hls 디먹서의 기본
-        // 엄격 확장자 검사(extension_picky)가 이를 거부해 "Invalid data found"로
-        // 실패했다 (실측 확인: extension_picky 끄면 정상 캡처됨).
-        "-extension_picky",
-        "0",
-        "-reconnect",
-        "1",
-        "-reconnect_streamed",
-        "1",
-        "-reconnect_at_eof",
-        "1",
-        "-reconnect_delay_max",
-        "5",
-        "-i",
+      buildFfmpegArgs({
         hlsUrl,
-        "-vf",
-        `fps=${FRAME_FPS},scale=-2:${FRAME_HEIGHT}`,
-        "-q:v",
-        String(FRAME_JPEG_QUALITY),
-        "-f",
-        "image2",
-        "-strftime",
-        "1",
-        path.join(this.framesDir, "%s.jpg")
-      ],
+        framesDir: this.framesDir,
+        fps: FRAME_FPS,
+        height: FRAME_HEIGHT,
+        jpegQuality: FRAME_JPEG_QUALITY
+      }),
       { stdio: ["ignore", "pipe", "pipe"] }
     );
     this.child = child;
