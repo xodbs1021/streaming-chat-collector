@@ -206,6 +206,9 @@ export function Timeline({
   }
 
   function startDrag(absoluteIndex: number) {
+    // 구간 드래그 중에는 라이브 자동추적을 끈다 — 안 그러면 새 데이터가 올 때마다
+    // 뷰가 끝으로 점프해 선택 중인 구간·프레임이 밀려버린다. (끝까지 스크롤하면 다시 follow)
+    setFollowLatest(false);
     setDragStartIndex(absoluteIndex);
     setDragEndIndex(absoluteIndex);
     emitSelection(absoluteIndex, absoluteIndex);
