@@ -17,7 +17,8 @@ payload="$(cat)"
 stop_active="$(printf '%s' "$payload" | json_get stop_hook_active)"
 
 # (1) 코드 변경이 없는 턴 → 검사 전부 생략. 읽기 전용 질문에 tsc 를 돌리지 않는다.
-if [ ! -s "$AUDIT_FLAG" ]; then
+#     두 게이트 플래그(감사·설명)가 모두 비어야 "할 일 없음"이다.
+if [ ! -s "$AUDIT_FLAG" ] && [ ! -s "$EXPLAIN_FLAG" ]; then
   rm -f "$BLOCK_COUNT" 2>/dev/null
   exit 0
 fi
@@ -30,9 +31,9 @@ fi
 [ -z "$count" ] && count=0
 
 if [ "$count" -ge "$MAX_BLOCKS" ]; then
-  changed="$(tr -d '"\\' < "$AUDIT_FLAG" 2>/dev/null | tr '\n' ' ')"
-  rm -f "$AUDIT_FLAG" "$BLOCK_COUNT" 2>/dev/null
-  printf '{"systemMessage":"[감사 게이트] %s회 차단 후에도 미해결이라 세션 벽돌 방지를 위해 통과시킵니다. 이 턴의 완료 주장을 신뢰하지 마세요. 미감사 변경: %s"}\n' \
+  changed="$(cat "$AUDIT_FLAG" "$EXPLAIN_FLAG" 2>/dev/null | tr -d '"\\' | sort -u | tr '\n' ' ')"
+  rm -f "$AUDIT_FLAG" "$EXPLAIN_FLAG" "$BLOCK_COUNT" 2>/dev/null
+  printf '{"systemMessage":"[완료 게이트] %s회 차단 후에도 미해결이라 세션 벽돌 방지를 위해 통과시킵니다. 이 턴의 완료 주장(및 변경 설명)을 신뢰하지 마세요. 미처리 변경: %s"}\n' \
     "$MAX_BLOCKS" "$changed"
   exit 0
 fi
@@ -86,7 +87,28 @@ else
   fi
 fi
 
-# (4) 타입체크는 통과했지만 감사자가 아직 안 돌았다.
+# (4) change-explainer 게이트 (Phase 5) — 감사자보다 먼저 강제한다.
+#     코드가 바뀐 턴은 변경 설명 없이 끝낼 수 없다. change-explainer 가 실제로
+#     사용자용 설명을 낸 뒤에만 .needs-explain 을 지운다.
+#     (완료 감사와 별개로 이 게이트만 끄려면 ECC_DISABLED_HOOKS=stop:explain)
+if [ -s "$EXPLAIN_FLAG" ] && ! hook_disabled "stop:explain"; then
+  {
+    echo "[완료 차단] change-explainer 미실행 — 변경 설명 없이 끝낼 수 없습니다."
+    echo
+    echo "이 턴에서 바뀐 코드/설정:"
+    sed 's/^/  - /' "$EXPLAIN_FLAG" 2>/dev/null
+    echo
+    echo "해야 할 일:"
+    echo "  1. change-explainer 에이전트로 실제 diff 기반 사용자용 변경 설명을 낸다."
+    echo "  2. 설명을 낸 뒤에만:  rm -f .claude/.needs-explain"
+    echo "     설명 없이 플래그만 지우는 것은 이 게이트의 존재 이유를 없앤다."
+    echo
+    echo "차단 $((count + 1))/${MAX_BLOCKS}.  탈출구: CHAT_HOOKS=off  또는  ECC_DISABLED_HOOKS=stop:explain"
+  } >&2
+  bump_and_block
+fi
+
+# (5) 타입체크는 통과했지만 감사자가 아직 안 돌았다.
 {
   echo "[완료 차단] completion-auditor 미실행 — '완료'라고 말할 수 없습니다."
   echo
