@@ -245,6 +245,12 @@ export interface MediaAnalysisResult {
   createdAt: number;
 }
 
+/** ffmpeg 캡처 화질(세로 픽셀). scale=-2:<h>의 대상 높이로 쓰인다. */
+export type CaptureQuality = 1080 | 720 | 480 | 360;
+
+/** 관리 UI에 노출하는 화질 선택지 (높은 화질부터). */
+export const CAPTURE_QUALITIES: readonly CaptureQuality[] = [1080, 720, 480, 360];
+
 export interface OverlaySettings {
   maxMessages: number;
   fontSize: number;
@@ -254,6 +260,7 @@ export interface OverlaySettings {
   compactMode: boolean;
   messageLifetimeSec: number;
   backgroundOpacity: number;
+  captureQuality: CaptureQuality;
 }
 
 export interface ProviderStatus {

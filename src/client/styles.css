@@ -1212,8 +1212,47 @@ time {
 
 .action-row {
   display: flex;
+  align-items: center;
   gap: 10px;
   margin-top: 16px;
+}
+
+/* 화질 셀렉터 — 연결/해제 라인 최우측으로 밀어붙인다. */
+.quality-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 42px;
+  margin-left: auto;
+  padding: 0 6px 0 12px;
+  border: 1px solid rgba(236, 255, 245, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #ecfff5;
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.quality-select select {
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 6px;
+  background: rgba(4, 17, 11, 0.35);
+  color: #ecfff5;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+:root[data-theme="light"] .quality-select {
+  border-color: rgba(9, 30, 21, 0.16);
+  background: rgba(9, 30, 21, 0.04);
+  color: #0c2c1e;
+}
+
+:root[data-theme="light"] .quality-select select {
+  background: rgba(9, 30, 21, 0.06);
+  color: #0c2c1e;
 }
 
 .provider-status-grid {
