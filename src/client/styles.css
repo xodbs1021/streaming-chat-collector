@@ -2124,23 +2124,13 @@ time {
   color: #3c5c4d;
 }
 
-.frame-player-scrubber {
-  display: flex;
-  justify-content: center;
-  gap: 5px;
-}
-
-.frame-player-scrubber span {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: rgba(236, 255, 245, 0.18);
-  transition: background 150ms ease, transform 150ms ease;
-}
-
-.frame-player-scrubber span.active {
-  background: #31e895;
-  transform: scale(1.25);
+/* 구간 사진 요약 — 프레임 수와 무관하게 고정 크기 한 줄(점 스크러버가 UI를 늘리던 문제 대체) */
+.frame-player-summary {
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(236, 255, 245, 0.6);
 }
 
 :root[data-theme="light"] .frame-preview-large {
@@ -2148,6 +2138,6 @@ time {
   background: rgba(18, 56, 38, 0.06);
 }
 
-:root[data-theme="light"] .frame-player-scrubber span {
-  background: rgba(18, 56, 38, 0.16);
+:root[data-theme="light"] .frame-player-summary {
+  color: #4c6558;
 }
