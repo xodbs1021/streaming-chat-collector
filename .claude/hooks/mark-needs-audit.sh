@@ -28,7 +28,13 @@ case "$rel" in
 esac
 
 mkdir -p "$STATE_DIR" 2>/dev/null
-if ! grep -qxF "$rel" "$AUDIT_FLAG" 2>/dev/null; then
-  printf '%s\n' "$rel" >> "$AUDIT_FLAG" 2>/dev/null
-fi
+# 두 완료 게이트를 동시에 세운다:
+#   .needs-audit   → completion-auditor 강제 (Phase 6)
+#   .needs-explain → change-explainer 강제 (Phase 5)
+# 둘 다 해당 에이전트가 실제로 돈 뒤에만 각자 수동으로 지워진다. Stop 훅이 둘 다 본다.
+for flag in "$AUDIT_FLAG" "$EXPLAIN_FLAG"; do
+  if ! grep -qxF "$rel" "$flag" 2>/dev/null; then
+    printf '%s\n' "$rel" >> "$flag" 2>/dev/null
+  fi
+done
 exit 0
