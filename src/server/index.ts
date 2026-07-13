@@ -40,17 +40,22 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(app.server, {
 const recorder = new ChatRecorder(path.resolve(process.cwd(), config.chatDataDir));
 // 콜백은 "미설치로 확정되지 않았나"를 반환한다 — unknown(프로브 전)/ready는 true, 확정 미설치만 false.
 const isFfmpegNotMissing = () => getFfmpegReadiness() !== "missing";
+// 화질은 설정의 단일 진실원에서 조회한다 — state는 아래에서 초기화되지만 이 화살표는
+// 캡처 spawn 시점(런타임)에만 호출되므로 참조 시 항상 초기화가 끝나 있다.
+const getCaptureHeight = () => state.getSettings().captureQuality;
 const frameCapture = new FrameCaptureManager(
   path.resolve(process.cwd(), config.chatDataDir, "frames", "chzzk"),
   fetchChzzkHlsUrl,
   (level, message) => appendProviderLog({ provider: "chzzk", level, message }),
-  isFfmpegNotMissing
+  isFfmpegNotMissing,
+  getCaptureHeight
 );
 const frameCaptureSoop = new FrameCaptureManager(
   path.resolve(process.cwd(), config.chatDataDir, "frames", "soop"),
   fetchSoopHlsUrl,
   (level, message) => appendProviderLog({ provider: "soop", level, message }),
-  isFfmpegNotMissing
+  isFfmpegNotMissing,
+  getCaptureHeight
 );
 const frameCaptureManagers = { chzzk: frameCapture, soop: frameCaptureSoop } as const;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
@@ -117,12 +122,27 @@ app.get("/api/health", async () => ({
 
 app.get("/api/settings", async () => state.getSettings());
 
+/**
+ * 설정 패치를 저장하고, 캡처 화질이 바뀌었으면 실행 중인 캡처를 즉시 새 화질로 재기동한다.
+ * socket/PUT/POST 세 경로가 공유하는 단일 진입점 — 화질 반영 로직이 한 곳에만 있게 한다.
+ */
+function applySettingsPatch(patch: Partial<OverlaySettings>): OverlaySettings {
+  const previousQuality = state.getSettings().captureQuality;
+  const next = state.updateSettings(patch);
+  if (next.captureQuality !== previousQuality) {
+    for (const manager of Object.values(frameCaptureManagers)) {
+      manager.restartForConfigChange();
+    }
+  }
+  return next;
+}
+
 app.put<{ Body: Partial<OverlaySettings> }>("/api/settings", async (request) => {
-  return state.updateSettings(request.body ?? {});
+  return applySettingsPatch(request.body ?? {});
 });
 
 app.post<{ Body: Partial<OverlaySettings> }>("/api/settings", async (request) => {
-  return state.updateSettings(request.body ?? {});
+  return applySettingsPatch(request.body ?? {});
 });
 
 registerAnalyticsRoutes(app, { recorder, liveAnalytics, io });
@@ -141,7 +161,7 @@ io.on("connection", (socket) => {
   socket.emit("analytics:live", liveAnalytics.getSummary(recorder.getActiveSession()));
 
   socket.on("settings:update", (patch) => {
-    state.updateSettings(patch);
+    applySettingsPatch(patch);
   });
 
   socket.on("test:message", (content) => {

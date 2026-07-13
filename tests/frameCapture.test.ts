@@ -18,6 +18,14 @@ describe("buildFfmpegArgs", () => {
     expect(args[args.indexOf("-q:v") + 1]).toBe("5");
   });
 
+  it("reflects the selected capture height in the scale filter", () => {
+    // 화질 셀렉터 값이 scale=-2:<height>로 그대로 흘러야 한다.
+    const hi = buildFfmpegArgs({ ...params, height: 1080 });
+    const lo = buildFfmpegArgs({ ...params, height: 360 });
+    expect(hi[hi.indexOf("-vf") + 1]).toBe("fps=1,scale=-2:1080");
+    expect(lo[lo.indexOf("-vf") + 1]).toBe("fps=1,scale=-2:360");
+  });
+
   it("streams mjpeg frames to stdout instead of writing strftime-named files", () => {
     const args = buildFfmpegArgs(params);
     // 명명 주체를 ffmpeg에서 Node로 옮겼다 — strftime/%s.jpg는 제거되고 파이프로 전환.

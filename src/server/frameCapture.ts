@@ -190,6 +190,9 @@ export class FrameCaptureManager {
   private ffmpegMissingLogged = false;
   private ffmpegMissing = false;
   private hlsWarningLogged = false;
+  // 설정 변경(화질) 등으로 의도적으로 child를 죽였음을 표시한다. exit 핸들러가 이를 보고
+  // 실패로 오인(경고 로그·백오프)하지 않고 즉시 새 높이로 재기동한다.
+  private intentionalRestart = false;
   private lastError: string | undefined;
   private lastFailureReason: FrameCaptureFailureReason | undefined;
   private lastFrameGrowthAt = Date.now();
@@ -203,7 +206,10 @@ export class FrameCaptureManager {
     private readonly log: FrameCaptureLogger,
     // 부팅 프로브 결과 주입 — "known missing"이면 spawn 없이 즉시 프라이밍한다.
     // 콜백은 "미설치로 확정되지 않았나"(unknown/ready→true)를 반환하므로, false는 확정 미설치만을 뜻한다.
-    private readonly isFfmpegReady?: () => boolean
+    private readonly isFfmpegReady?: () => boolean,
+    // 캡처 화질(세로 픽셀)을 매 spawn마다 조회한다. 설정(단일 진실원)을 읽으므로
+    // 화질을 바꾸고 재기동하면 별도 상태 복제 없이 새 높이가 반영된다. 미주입 시 기본 높이.
+    private readonly getFrameHeight?: () => number
   ) {}
 
   isEnabled() {
@@ -255,6 +261,9 @@ export class FrameCaptureManager {
     // 해제 후 잔류 사유/카운터가 거짓 상태를 표시하지 않도록 클리어 (start()에서만 리셋되던 것을 보완)
     this.lastFailureReason = undefined;
     this.restartAttempts = 0;
+    // 화질 변경 SIGKILL 직후 exit 이벤트 전에 해제되면 이 플래그가 true로 남아,
+    // 다음 세션의 실제 크래시를 의도적 재기동으로 오판(진단 유실)할 수 있어 함께 클리어한다.
+    this.intentionalRestart = false;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = undefined;
@@ -274,6 +283,19 @@ export class FrameCaptureManager {
       // SIGKILL 유예 타이머가 이벤트루프와 함께 사라져 좀비 ffmpeg가 남을 수 있다.
       await this.killChild(child);
     }
+  }
+
+  /**
+   * 설정(화질) 변경을 실행 중인 캡처에 즉시 반영한다. 현재 캡처 중일 때만 child를 죽이고,
+   * exit 핸들러가 intentionalRestart를 보고 백오프·경고 없이 새 높이로 곧바로 재기동한다.
+   * 미연결/비활성 매니저에는 아무 일도 하지 않는다(no-op).
+   */
+  restartForConfigChange() {
+    if (this.stopped || !this.child) {
+      return;
+    }
+    this.intentionalRestart = true;
+    this.child.kill("SIGKILL");
   }
 
   /** SIGTERM 후 유예시간 안에 종료 안 되면 SIGKILL로 확실히 정리한다 (실측: 멈춘 ffmpeg가 SIGTERM을 무시하는 경우 있음) */
@@ -388,6 +410,9 @@ export class FrameCaptureManager {
     this.hlsWarningLogged = false;
     this.lastError = undefined;
 
+    // 화질은 설정에서 매 기동마다 조회한다 — 재기동만으로 새 높이가 반영된다.
+    const height = this.getFrameHeight?.() ?? FRAME_HEIGHT;
+
     // 세그먼트가 신호서명 URL만으로 인증되고 2초 단위로 빠르게 회전한다(실측 확인).
     // 커스텀 헤더는 불필요해서 뺐고, 대신 HTTP 재연결 옵션으로 짧은 세그먼트 만료 경합에 대비한다.
     const child = spawn(
@@ -395,7 +420,7 @@ export class FrameCaptureManager {
       buildFfmpegArgs({
         hlsUrl,
         fps: FRAME_FPS,
-        height: FRAME_HEIGHT,
+        height,
         jpegQuality: FRAME_JPEG_QUALITY
       }),
       { stdio: ["ignore", "pipe", "pipe"] }
@@ -439,16 +464,23 @@ export class FrameCaptureManager {
       // spawn 경계 리셋 — 다음 프로세스의 첫 프레임이 새 기준점을 잡되, lastFrameSec/
       // lastFrameBuffer는 재접속 갭필용으로 유지된다.
       this.assigner.resetSpawn();
-      if (!this.stopped) {
-        this.lastFailureReason = "ffmpeg-exit";
-        const detail = stderrTail.trim().split("\n").slice(-3).join(" / ");
-        this.lastError = `ffmpeg 종료 (code ${code ?? "?"})${detail ? `: ${detail}` : ""}`;
-        this.log("warning", `프레임 캡처가 중단되었습니다. ${this.lastError}`);
-        this.scheduleRestart();
+      if (this.stopped) {
+        return;
       }
+      // 화질 변경 등 의도적 재기동: 실패로 취급하지 않고 백오프 없이 즉시 새 높이로 재기동한다.
+      if (this.intentionalRestart) {
+        this.intentionalRestart = false;
+        void this.spawnCapture();
+        return;
+      }
+      this.lastFailureReason = "ffmpeg-exit";
+      const detail = stderrTail.trim().split("\n").slice(-3).join(" / ");
+      this.lastError = `ffmpeg 종료 (code ${code ?? "?"})${detail ? `: ${detail}` : ""}`;
+      this.log("warning", `프레임 캡처가 중단되었습니다. ${this.lastError}`);
+      this.scheduleRestart();
     });
 
-    this.log("info", `프레임 캡처 시작 (${this.channelId}, ${FRAME_FPS}fps/${FRAME_HEIGHT}p)`);
+    this.log("info", `프레임 캡처 시작 (${this.channelId}, ${FRAME_FPS}fps/${height}p)`);
   }
 
   private scheduleRestart() {

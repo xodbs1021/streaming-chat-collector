@@ -1,6 +1,7 @@
-import { CheckCircle2, FlaskConical, LogIn, Plug, Power, RadioTower, Send, Settings2, Wifi } from "lucide-react";
+import { CheckCircle2, FlaskConical, LogIn, MonitorPlay, Plug, Power, RadioTower, Send, Settings2, Wifi } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
-import type { ChatProvider, OverlaySettings, ProviderDiagnosticLog, ProviderStatus, ProviderStatusMap, SourceMode } from "../../shared/types";
+import { CAPTURE_QUALITIES } from "../../shared/types";
+import type { CaptureQuality, ChatProvider, OverlaySettings, ProviderDiagnosticLog, ProviderStatus, ProviderStatusMap, SourceMode } from "../../shared/types";
 import { useRealtime } from "../hooks/useRealtime";
 
 export function AdminRoute() {
@@ -184,6 +185,21 @@ export function AdminRoute() {
               <Power size={18} />
               해제
             </button>
+            <label className="quality-select">
+              <MonitorPlay size={15} />
+              <span>화질</span>
+              <select
+                aria-label="캡처 화질"
+                value={localSettings.captureQuality}
+                onChange={(event) => updateSettings({ captureQuality: Number(event.target.value) as CaptureQuality })}
+              >
+                {CAPTURE_QUALITIES.map((quality) => (
+                  <option key={quality} value={quality}>
+                    {quality}p
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
 
           <ProviderStatusCards statuses={providerStatuses} selectedProvider={provider} />
