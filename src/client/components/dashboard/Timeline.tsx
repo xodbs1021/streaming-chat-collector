@@ -350,7 +350,7 @@ export function Timeline({
         <div className="timeline-tooltip" style={{ left: hovered.x, top: hovered.y }}>
           {hoveredFrameSecond !== undefined && (
             <FramePreview
-              key={`${hoveredProvider}-${hoveredFrameSecond}`}
+              key={hoveredProvider}
               fallbackProvider={otherProvider(hoveredProvider)}
               provider={hoveredProvider}
               second={hoveredFrameSecond}

@@ -92,7 +92,8 @@ export function FramePlayerPanel({
       </div>
       {second !== undefined ? (
         <>
-          <FramePreview key={`${activeProvider}-${second}`} large provider={activeProvider} second={second} />
+          {/* key는 provider 단위 — 프레임(second)마다 remount하면 <img>가 새로 생겨 로드 전 빈 화면이 깜빡인다 */}
+          <FramePreview key={activeProvider} large provider={activeProvider} second={second} />
           <time className="frame-timestamp" dateTime={new Date(second * 1000).toISOString()}>
             {formatFrameTimestamp(second)}
           </time>
