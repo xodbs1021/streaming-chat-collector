@@ -52,6 +52,8 @@ export interface ChatRecord extends ChatMessage {
 
 export interface RecordingSession {
   sessionId: string;
+  /** 이 provider 세션이 속한 방송 — 신규 레이아웃에서 `<broadcastId>/chat/<provider>/`를 가리킨다. */
+  broadcastId?: string;
   provider: ChatProvider;
   sourceMode: SourceMode;
   channelId: string;
@@ -63,10 +65,32 @@ export interface RecordingSession {
   archivedAt?: number;
 }
 
+/** 방송에 참여한 provider 한 줄 — broadcast.meta.json의 providers 배열 원소. */
+export interface BroadcastProviderRef {
+  provider: ChatProvider;
+  sourceMode: SourceMode;
+  channelId: string;
+}
+
+/** 방송(broadcast) 단위 세션 — chzzk+soop 등 여러 provider를 하나의 broadcastId로 묶는다. */
+export interface BroadcastSession {
+  broadcastId: string;
+  startedAt: number;
+  endedAt?: number;
+  providers: BroadcastProviderRef[];
+  displayName?: string;
+  archivedAt?: number;
+}
+
+/** 녹화 라이프사이클 상태. idle=비녹화, recording=저장 중, grace=방송종료 감지 후 자동종료 대기. */
+export type RecordingState = "idle" | "recording" | "grace";
+
 export interface RecordingStatus {
   enabled: boolean;
   dataDir: string;
   message: string;
+  recordingState?: RecordingState;
+  activeBroadcastId?: string;
   activeSession?: RecordingSession;
   activeSessions?: RecordingSession[];
   lastRecordAt?: number;
@@ -308,4 +332,8 @@ export interface ClientToServerEvents {
   "provider:connect": (request: ConnectProviderRequest) => void;
   "provider:disconnect": (request?: DisconnectProviderRequest) => void;
   "settings:update": (settings: Partial<OverlaySettings>) => void;
+  /** 녹화 시작 — 현재 연결된 provider들을 하나의 방송으로 묶어 저장을 시작한다. */
+  "recording:start": () => void;
+  /** 녹화 종료 — 활성 방송 세션을 확정하고 저장을 멈춘다(연결은 유지). */
+  "recording:stop": () => void;
 }

@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm, stat, writeFile, appendFile } from "node:fs/promises";
 import path from "node:path";
 import type {
+  BroadcastProviderRef,
+  BroadcastSession,
   ChatMessage,
   ChatProvider,
   ChatRecord,
@@ -10,20 +12,44 @@ import type {
   HighlightCategory,
   AnalyticsRankItem,
   RecordingSession,
+  RecordingState,
   RecordingStatus,
   TimelineMarker,
   ViewerCountSample
 } from "../shared/types";
+import { BroadcastPaths } from "./broadcast/broadcastPaths";
+import { createBroadcastId } from "./broadcast/broadcastId";
+import { composeSessionKey, parseSessionKey } from "./broadcast/sessionKey";
 
 const META_FLUSH_DELAY_MS = 5_000;
+
+/** 현재 저장 중인 방송 1개 — 방송 메타 + provider별 세션 맵. */
+interface ActiveBroadcast {
+  session: BroadcastSession;
+  providers: Map<ChatProvider, RecordingSession>;
+}
+
+/** sessionId를 broadcastId+provider로 되돌린 위치 정보(경로 조립용). */
+interface SessionLocation {
+  broadcastId: string;
+  provider: ChatProvider;
+}
 
 interface SerializedRecord {
   record: ChatRecord;
   line: string;
 }
 
+/**
+ * 방송(broadcast) 단위 채팅 저장소. "연결"과 무관하게, 명시적으로 녹화를 시작해야 저장한다.
+ * 저장 레이아웃은 `<dataDir>/<broadcastId>/chat/<provider>/…` (경로는 BroadcastPaths가 단일 진실원).
+ * 외부(라우트)에는 provider 세션을 `<broadcastId>__<provider>` 합성 sessionId로 노출한다.
+ */
 export class ChatRecorder {
-  private activeSessions = new Map<ChatProvider, RecordingSession>();
+  private readonly paths: BroadcastPaths;
+  private activeBroadcast: ActiveBroadcast | undefined;
+  // 자동종료 유예(grace) 여부 — 타이머는 index.ts가 소유하고, 상태 방출용으로 이 플래그를 알려준다.
+  private autoStopPending = false;
   private sequences = new Map<ChatProvider, number>();
   private lastRecordAt: number | undefined;
   private latestActiveProvider: ChatProvider | undefined;
@@ -32,68 +58,114 @@ export class ChatRecorder {
   private countCache = new Map<string, { mtimeMs: number; size: number; count: number }>();
   private writeQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly dataDir: string) {}
+  constructor(private readonly dataDir: string) {
+    this.paths = new BroadcastPaths(dataDir);
+  }
 
-  getStatus(): RecordingStatus {
-    const activeSessions = this.getActiveSessions();
-    return {
-      enabled: true,
-      dataDir: this.dataDir,
-      message: activeSessions.length > 0 ? `${activeSessions.map((session) => providerLabel(session.provider)).join(" · ")} 저장 중` : "저장 대기 중",
-      activeSession: this.getActiveSession(),
-      activeSessions,
-      lastRecordAt: this.lastRecordAt
+  // ── 녹화 라이프사이클 ────────────────────────────────────────────────
+
+  isRecording(): boolean {
+    return this.activeBroadcast !== undefined;
+  }
+
+  getActiveBroadcastId(): string | undefined {
+    return this.activeBroadcast?.session.broadcastId;
+  }
+
+  /**
+   * 자동종료 유예(grace) 진입/해제를 상태 방출에 반영한다. recorder는 grace 타이머를 소유하지 않으므로
+   * 정책 주체(index.ts)가 schedule/cancel 시점에 알려준다 — getStatus의 recordingState가 "grace"로 나가게 한다.
+   */
+  setAutoStopPending(pending: boolean) {
+    this.autoStopPending = pending;
+  }
+
+  /**
+   * 녹화를 시작한다 — broadcastId를 발급하고 방송/ provider 디렉토리와 메타를 연다.
+   * 이미 녹화 중이면 현재 방송을 그대로 반환(idempotent). provider가 하나도 없으면 시작하지 않는다.
+   */
+  async startRecording(providers: BroadcastProviderRef[]): Promise<BroadcastSession | undefined> {
+    if (this.activeBroadcast) {
+      return this.activeBroadcast.session;
+    }
+    if (providers.length === 0) {
+      return undefined;
+    }
+    const startedAt = Date.now();
+    const broadcastId = createBroadcastId(new Date(startedAt));
+    this.activeBroadcast = {
+      session: { broadcastId, startedAt, providers: [] },
+      providers: new Map()
     };
-  }
-
-  getActiveSession(provider?: ChatProvider) {
-    if (provider) {
-      return this.activeSessions.get(provider);
+    this.sequences.clear();
+    this.latestActiveProvider = undefined;
+    this.autoStopPending = false;
+    await mkdir(this.paths.broadcastDir(broadcastId), { recursive: true });
+    for (const ref of providers) {
+      await this.openProviderSession(ref, startedAt);
     }
-    if (this.latestActiveProvider) {
-      const latest = this.activeSessions.get(this.latestActiveProvider);
-      if (latest) {
-        return latest;
-      }
+    await this.writeBroadcastMeta(this.activeBroadcast.session);
+    return this.activeBroadcast.session;
+  }
+
+  /** 녹화를 종료한다 — 방송/ provider 메타에 endedAt을 기록하고 활성 상태를 비운다. 비녹화면 undefined. */
+  async stopRecording(): Promise<BroadcastSession | undefined> {
+    const active = this.activeBroadcast;
+    if (!active) {
+      return undefined;
     }
-    return this.getActiveSessions().at(0);
+    // 먼저 활성 상태를 비워, 종료 처리 중 도착하는 메시지가 endedAt 이후에 append되지 않게 한다
+    // (recordMessage는 activeBroadcast가 없으면 디스크에 쓰지 않는다). 그다음 이미 큐에 쌓인
+    // 쓰기를 모두 흘려보내고 종료 메타를 기록한다.
+    this.activeBroadcast = undefined;
+    this.autoStopPending = false;
+    await this.writeQueue;
+    const endedAt = Date.now();
+    for (const session of active.providers.values()) {
+      this.dirtyMeta.delete(session.sessionId);
+      await this.writeProviderMeta({ ...session, endedAt });
+    }
+    const endedBroadcast: BroadcastSession = { ...active.session, endedAt };
+    await this.writeBroadcastMeta(endedBroadcast);
+    this.sequences.clear();
+    this.latestActiveProvider = undefined;
+    return endedBroadcast;
   }
 
-  getActiveSessions() {
-    return Array.from(this.activeSessions.values()).sort((left, right) => right.startedAt - left.startedAt);
-  }
+  // ── 실시간 기록 ─────────────────────────────────────────────────────
 
+  /**
+   * 메시지를 처리한다. 녹화 중이면 디스크에 저장하고, 아니어도 라이브 분석용 ChatRecord는 반환한다
+   * (연결=대시보드 표시가 녹화와 무관하게 유지되도록). mock은 무시.
+   */
   async recordMessage(message: ChatMessage): Promise<ChatRecord | undefined> {
     if (message.sourceMode === "mock") {
       return undefined;
     }
 
-    const activeSession = await this.ensureSession(message);
-    if (!activeSession) {
-      return undefined;
-    }
-
     const receivedAt = Date.now();
-    const nextSequence = (this.sequences.get(message.provider) ?? 0) + 1;
+    const provider = message.provider;
+    const providerSession = this.activeBroadcast ? await this.ensureProviderSession(message) : undefined;
+
+    const nextSequence = (this.sequences.get(provider) ?? 0) + 1;
+    this.sequences.set(provider, nextSequence);
+    this.lastRecordAt = receivedAt;
+
     const serialized = serializeRecord({
       ...message,
-      sessionId: activeSession.sessionId,
+      sessionId: providerSession?.sessionId ?? "",
       sequence: nextSequence,
       receivedAt
     });
 
-    // 상태는 동기 갱신, 디스크 쓰기는 큐로 직렬화 —
-    // 채팅 폭주 시 디스크 지연이 실시간 분석 반영을 막지 않도록 함
-    this.sequences.set(message.provider, serialized.record.sequence);
-    this.lastRecordAt = receivedAt;
-    this.latestActiveProvider = message.provider;
-    const nextSession = {
-      ...activeSession,
-      messageCount: activeSession.messageCount + 1
-    };
-    this.activeSessions.set(message.provider, nextSession);
-    this.scheduleMetaWrite(nextSession);
-    this.queueAppend(this.sessionFilePath(activeSession.sessionId), `${serialized.line}\n`);
+    if (providerSession && this.activeBroadcast) {
+      // 상태는 동기 갱신, 디스크 쓰기는 큐로 직렬화 — 채팅 폭주 시 디스크 지연이 분석 반영을 막지 않도록.
+      this.latestActiveProvider = provider;
+      const nextSession = { ...providerSession, messageCount: providerSession.messageCount + 1 };
+      this.activeBroadcast.providers.set(provider, nextSession);
+      this.scheduleMetaWrite(nextSession);
+      this.queueAppend(this.paths.chatFilePath(nextSession.broadcastId ?? "", provider), `${serialized.line}\n`);
+    }
     return serialized.record;
   }
 
@@ -102,28 +174,129 @@ export class ChatRecorder {
     await this.writeQueue;
   }
 
-  private queueAppend(filePath: string, line: string) {
-    this.writeQueue = this.writeQueue
-      .then(() => mkdir(this.dataDir, { recursive: true }))
-      .then(() => appendFile(filePath, line, "utf8"))
-      .catch((error) => {
-        console.error("[recorder] 채팅 저장 실패:", error instanceof Error ? error.message : error);
-      });
-  }
-
   async recordViewerSample(provider: ChatProvider, count: number) {
-    const activeSession = this.activeSessions.get(provider);
-    if (!activeSession || !Number.isFinite(count) || count < 0) {
+    const session = this.activeBroadcast?.providers.get(provider);
+    if (!session || !Number.isFinite(count) || count < 0) {
       return;
     }
     const sample: ViewerCountSample = { provider, timestamp: Date.now(), count: Math.round(count) };
-    this.queueAppend(this.viewersFilePath(activeSession.sessionId), `${JSON.stringify(sample)}\n`);
+    this.queueAppend(this.paths.viewersFilePath(session.broadcastId ?? "", provider), `${JSON.stringify(sample)}\n`);
+  }
+
+  // ── 상태 조회 ───────────────────────────────────────────────────────
+
+  getStatus(): RecordingStatus {
+    const activeSessions = this.getActiveSessions();
+    const recordingState: RecordingState = this.activeBroadcast
+      ? this.autoStopPending
+        ? "grace"
+        : "recording"
+      : "idle";
+    return {
+      enabled: true,
+      dataDir: this.dataDir,
+      message:
+        activeSessions.length > 0
+          ? `${activeSessions.map((session) => providerLabel(session.provider)).join(" · ")} 저장 중`
+          : "저장 대기 중",
+      recordingState,
+      activeBroadcastId: this.activeBroadcast?.session.broadcastId,
+      activeSession: this.getActiveSession(),
+      activeSessions,
+      lastRecordAt: this.lastRecordAt
+    };
+  }
+
+  getActiveSession(provider?: ChatProvider) {
+    if (!this.activeBroadcast) {
+      return undefined;
+    }
+    if (provider) {
+      return this.activeBroadcast.providers.get(provider);
+    }
+    if (this.latestActiveProvider) {
+      const latest = this.activeBroadcast.providers.get(this.latestActiveProvider);
+      if (latest) {
+        return latest;
+      }
+    }
+    return this.getActiveSessions().at(0);
+  }
+
+  getActiveSessions() {
+    if (!this.activeBroadcast) {
+      return [];
+    }
+    return Array.from(this.activeBroadcast.providers.values()).sort((left, right) => right.startedAt - left.startedAt);
+  }
+
+  // ── 세션 목록·읽기 (라우트가 합성 sessionId로 호출) ───────────────────
+
+  async listSessions(options: { includeArchived?: boolean } = {}) {
+    await mkdir(this.dataDir, { recursive: true });
+    const entries = await readdir(this.dataDir, { withFileTypes: true });
+    const broadcastDirs = entries.filter((entry) => entry.isDirectory());
+
+    const sessions: RecordingSession[] = [];
+    for (const dir of broadcastDirs) {
+      const broadcast = await this.readBroadcastMeta(dir.name);
+      if (!broadcast) {
+        continue;
+      }
+      for (const ref of broadcast.providers) {
+        const session = await this.readProviderMeta(broadcast.broadcastId, ref.provider);
+        if (session) {
+          sessions.push(session);
+        }
+      }
+    }
+
+    const withCounts = await Promise.all(
+      sessions
+        .filter((session) => options.includeArchived || !session.archivedAt)
+        .map((session) => this.withActualMessageCount(session))
+    );
+    return withCounts.sort((left, right) => right.startedAt - left.startedAt);
+  }
+
+  async getSession(sessionId: string) {
+    const location = this.locate(sessionId);
+    if (!location) {
+      return undefined;
+    }
+    const session = await this.readProviderMeta(location.broadcastId, location.provider);
+    return session ? this.withActualMessageCount(session) : undefined;
+  }
+
+  async readRecords(sessionId: string) {
+    await this.writeQueue;
+    const location = this.locate(sessionId);
+    if (!location) {
+      return [];
+    }
+    const filePath = this.paths.chatFilePath(location.broadcastId, location.provider);
+    try {
+      await stat(filePath);
+    } catch {
+      return [];
+    }
+    const content = await readFile(filePath, "utf8");
+    return content
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => parseRecord(line))
+      .filter((record): record is ChatRecord => Boolean(record));
   }
 
   async readViewerSamples(sessionId: string): Promise<ViewerCountSample[]> {
     await this.writeQueue;
+    const location = this.locate(sessionId);
+    if (!location) {
+      return [];
+    }
     try {
-      const content = await readFile(this.viewersFilePath(sanitizeSessionId(sessionId)), "utf8");
+      const content = await readFile(this.paths.viewersFilePath(location.broadcastId, location.provider), "utf8");
       return content
         .split("\n")
         .map((line) => line.trim())
@@ -136,73 +309,22 @@ export class ChatRecorder {
   }
 
   async deleteSession(sessionId: string): Promise<"active" | "missing" | "deleted"> {
-    const safeSessionId = sanitizeSessionId(sessionId);
-    if (this.getActiveSessions().some((session) => session.sessionId === safeSessionId)) {
+    const location = this.locate(sessionId);
+    if (!location) {
+      return "missing";
+    }
+    const compositeId = composeSessionKey(location.broadcastId, location.provider);
+    if (this.getActiveSessions().some((session) => session.sessionId === compositeId)) {
       return "active";
     }
-    const session = await this.readMeta(safeSessionId);
+    const session = await this.readProviderMeta(location.broadcastId, location.provider);
     if (!session) {
       return "missing";
     }
-    await Promise.all([
-      rm(this.sessionFilePath(safeSessionId), { force: true }),
-      rm(this.metaFilePath(safeSessionId), { force: true }),
-      rm(this.highlightsFilePath(safeSessionId), { force: true }),
-      rm(this.viewersFilePath(safeSessionId), { force: true }),
-      rm(this.markersFilePath(safeSessionId), { force: true })
-    ]);
-    this.countCache.delete(safeSessionId);
-    this.dirtyMeta.delete(safeSessionId);
+    await rm(this.paths.chatDir(location.broadcastId, location.provider), { recursive: true, force: true });
+    this.countCache.delete(session.sessionId);
+    this.dirtyMeta.delete(session.sessionId);
     return "deleted";
-  }
-
-  async endSession(provider?: ChatProvider) {
-    await this.writeQueue;
-    const targetProvider = provider ?? this.getActiveSession()?.provider;
-    if (!targetProvider) {
-      return undefined;
-    }
-
-    const activeSession = this.activeSessions.get(targetProvider);
-    if (!activeSession || activeSession.endedAt) {
-      return undefined;
-    }
-
-    const ended = {
-      ...activeSession,
-      endedAt: Date.now()
-    };
-    this.dirtyMeta.delete(ended.sessionId);
-    await this.writeMeta(ended);
-    this.activeSessions.delete(targetProvider);
-    this.sequences.delete(targetProvider);
-    if (this.latestActiveProvider === targetProvider) {
-      this.latestActiveProvider = this.getActiveSession()?.provider;
-    }
-    return ended;
-  }
-
-  async listSessions(options: { includeArchived?: boolean } = {}) {
-    await mkdir(this.dataDir, { recursive: true });
-    const entries = await readdir(this.dataDir);
-    const sessions = await Promise.all(
-      entries
-        .filter((entry) => entry.endsWith(".meta.json"))
-        .map(async (entry) => this.readMeta(entry.replace(/\.meta\.json$/, "")))
-    );
-    const sessionsWithActualCounts = await Promise.all(
-      sessions
-        .filter((session): session is RecordingSession => Boolean(session))
-        .filter((session) => options.includeArchived || !session.archivedAt)
-        .map((session) => this.withActualMessageCount(session))
-    );
-
-    return sessionsWithActualCounts.sort((left, right) => right.startedAt - left.startedAt);
-  }
-
-  async getSession(sessionId: string) {
-    const session = await this.readMeta(sessionId);
-    return session ? this.withActualMessageCount(session) : undefined;
   }
 
   async updateSessionMeta(sessionId: string, patch: { displayName?: string }) {
@@ -210,16 +332,11 @@ export class ChatRecorder {
     if (!session) {
       return undefined;
     }
-
     const displayName = sanitizeDisplayName(patch.displayName);
-    const nextSession = {
-      ...session,
-      displayName
-    };
-    // 진행 중 세션이면 인메모리 사본에도 반영 — 이후 채팅 수신으로 인한
-    // 주기적 meta flush나 세션 종료 기록이 이름 변경을 덮어쓰지 않도록
+    const nextSession = { ...session, displayName };
+    // 진행 중 세션이면 인메모리 사본에도 반영 — 이후 meta flush나 종료 기록이 이름 변경을 덮어쓰지 않도록.
     this.applyMetaPatchToActiveSession(session.sessionId, { displayName });
-    await this.writeMeta(nextSession);
+    await this.writeProviderMeta(nextSession);
     return nextSession;
   }
 
@@ -228,51 +345,21 @@ export class ChatRecorder {
     if (!session) {
       return undefined;
     }
-
-    const nextSession = {
-      ...session,
-      archivedAt: session.archivedAt ?? Date.now()
-    };
+    const nextSession = { ...session, archivedAt: session.archivedAt ?? Date.now() };
     this.applyMetaPatchToActiveSession(session.sessionId, { archivedAt: nextSession.archivedAt });
-    await this.writeMeta(nextSession);
+    await this.writeProviderMeta(nextSession);
     return nextSession;
   }
 
-  /** 디스크 메타 패치를 인메모리 활성 세션/대기 중 flush 사본에도 동기화 */
-  private applyMetaPatchToActiveSession(sessionId: string, patch: Partial<RecordingSession>) {
-    for (const [provider, active] of this.activeSessions) {
-      if (active.sessionId === sessionId) {
-        this.activeSessions.set(provider, { ...active, ...patch });
-      }
-    }
-    const pending = this.dirtyMeta.get(sessionId);
-    if (pending) {
-      this.dirtyMeta.set(sessionId, { ...pending, ...patch });
-    }
-  }
-
-  async readRecords(sessionId: string) {
-    await this.writeQueue;
-    const safeSessionId = sanitizeSessionId(sessionId);
-    const filePath = this.sessionFilePath(safeSessionId);
-    try {
-      await stat(filePath);
-    } catch {
-      return [];
-    }
-
-    const content = await readFile(filePath, "utf8");
-    return content
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => parseRecord(line))
-      .filter((record): record is ChatRecord => Boolean(record));
-  }
+  // ── 하이라이트 주석 ─────────────────────────────────────────────────
 
   async readHighlightAnnotations(sessionId: string): Promise<HighlightAnnotationMap> {
+    const location = this.locate(sessionId);
+    if (!location) {
+      return {};
+    }
     try {
-      const content = await readFile(this.highlightsFilePath(sanitizeSessionId(sessionId)), "utf8");
+      const content = await readFile(this.paths.highlightsFilePath(location.broadcastId, location.provider), "utf8");
       const parsed = JSON.parse(content) as HighlightAnnotationMap;
       return Object.fromEntries(
         Object.entries(parsed).filter(([, annotation]) => Boolean(annotation?.candidateId && annotation?.category))
@@ -299,7 +386,7 @@ export class ChatRecorder {
     const annotations = await this.readHighlightAnnotations(sessionId);
     const previous = annotations[candidateId];
     const now = Date.now();
-    const annotation = {
+    const annotation: HighlightAnnotation = {
       candidateId,
       category: patch.category ?? previous?.category ?? "other",
       note: patch.note ?? previous?.note ?? "",
@@ -313,8 +400,7 @@ export class ChatRecorder {
       updatedAt: now
     };
     annotations[candidateId] = annotation;
-    await mkdir(this.dataDir, { recursive: true });
-    await writeFile(this.highlightsFilePath(sessionId), `${JSON.stringify(annotations, null, 2)}\n`, "utf8");
+    await this.writeJsonForSession(sessionId, (loc) => this.paths.highlightsFilePath(loc.broadcastId, loc.provider), annotations);
     return annotation;
   }
 
@@ -325,14 +411,19 @@ export class ChatRecorder {
       return undefined;
     }
     delete annotations[candidateId];
-    await mkdir(this.dataDir, { recursive: true });
-    await writeFile(this.highlightsFilePath(sessionId), `${JSON.stringify(annotations, null, 2)}\n`, "utf8");
+    await this.writeJsonForSession(sessionId, (loc) => this.paths.highlightsFilePath(loc.broadcastId, loc.provider), annotations);
     return deleted;
   }
 
+  // ── 타임라인 마커 ───────────────────────────────────────────────────
+
   async readMarkers(sessionId: string): Promise<TimelineMarker[]> {
+    const location = this.locate(sessionId);
+    if (!location) {
+      return [];
+    }
     try {
-      const content = await readFile(this.markersFilePath(sanitizeSessionId(sessionId)), "utf8");
+      const content = await readFile(this.paths.markersFilePath(location.broadcastId, location.provider), "utf8");
       const parsed = JSON.parse(content) as TimelineMarker[];
       if (!Array.isArray(parsed)) {
         return [];
@@ -359,8 +450,7 @@ export class ChatRecorder {
       createdAt: Date.now()
     };
     const next = [...markers, marker].sort((left, right) => left.timestamp - right.timestamp);
-    await mkdir(this.dataDir, { recursive: true });
-    await writeFile(this.markersFilePath(sanitizeSessionId(sessionId)), `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    await this.writeJsonForSession(sessionId, (loc) => this.paths.markersFilePath(loc.broadcastId, loc.provider), next);
     return marker;
   }
 
@@ -371,43 +461,63 @@ export class ChatRecorder {
       return undefined;
     }
     const next = markers.filter((marker) => marker.id !== markerId);
-    await mkdir(this.dataDir, { recursive: true });
-    await writeFile(this.markersFilePath(sanitizeSessionId(sessionId)), `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    await this.writeJsonForSession(sessionId, (loc) => this.paths.markersFilePath(loc.broadcastId, loc.provider), next);
     return deleted;
   }
 
-  private async ensureSession(message: ChatMessage) {
-    const activeSession = this.activeSessions.get(message.provider);
-    if (activeSession && activeSession.sourceMode === message.sourceMode && activeSession.channelId === message.channelId) {
-      return activeSession;
-    }
+  // ── 내부: 세션 열기/메타 ────────────────────────────────────────────
 
-    if (activeSession) {
-      await this.endSession(message.provider);
+  /** 녹화 중 아직 없는 provider의 메시지가 오면 그 provider 세션을 방송에 합류시킨다. */
+  private async ensureProviderSession(message: ChatMessage): Promise<RecordingSession> {
+    const active = this.activeBroadcast;
+    if (!active) {
+      throw new Error("ensureProviderSession은 녹화 중에만 호출된다.");
     }
-
-    const startedAt = Date.now();
-    const sessionId = buildSessionId(startedAt, message.provider, message.channelId);
-    const nextSession = {
-      sessionId,
-      provider: message.provider,
-      sourceMode: message.sourceMode,
-      channelId: message.channelId,
-      startedAt,
-      messageCount: 0,
-      fileName: `${sessionId}.jsonl`
-    };
-    this.activeSessions.set(message.provider, nextSession);
-    this.sequences.set(message.provider, 0);
-    this.latestActiveProvider = message.provider;
-    await mkdir(this.dataDir, { recursive: true });
-    await this.writeMeta(nextSession);
-    return nextSession;
+    const existing = active.providers.get(message.provider);
+    if (existing) {
+      return existing;
+    }
+    return this.openProviderSession(
+      { provider: message.provider, sourceMode: message.sourceMode, channelId: message.channelId },
+      Date.now()
+    );
   }
 
-  private async readMeta(sessionId: string) {
+  private async openProviderSession(ref: BroadcastProviderRef, startedAt: number): Promise<RecordingSession> {
+    const active = this.activeBroadcast;
+    if (!active) {
+      throw new Error("openProviderSession은 녹화 중에만 호출된다.");
+    }
+    const broadcastId = active.session.broadcastId;
+    const session: RecordingSession = {
+      sessionId: composeSessionKey(broadcastId, ref.provider),
+      broadcastId,
+      provider: ref.provider,
+      sourceMode: ref.sourceMode,
+      channelId: ref.channelId,
+      startedAt,
+      messageCount: 0,
+      fileName: path.join("chat", ref.provider, "chat.jsonl")
+    };
+    active.providers.set(ref.provider, session);
+    const isNewProvider = !active.session.providers.some((entry) => entry.provider === ref.provider);
+    if (isNewProvider) {
+      active.session.providers = [...active.session.providers, ref];
+    }
+    this.sequences.set(ref.provider, 0);
+    await mkdir(this.paths.chatDir(broadcastId, ref.provider), { recursive: true });
+    await this.writeProviderMeta(session);
+    // 새 provider가 방송에 합류하면 broadcast.meta의 providers를 즉시 갱신한다
+    // (녹화 시작 후 뒤늦게 연결된 provider도 listSessions에 바로 잡히도록).
+    if (isNewProvider) {
+      await this.writeBroadcastMeta(active.session);
+    }
+    return session;
+  }
+
+  private async readProviderMeta(broadcastId: string, provider: ChatProvider): Promise<RecordingSession | undefined> {
     try {
-      const content = await readFile(this.metaFilePath(sanitizeSessionId(sessionId)), "utf8");
+      const content = await readFile(this.paths.metaFilePath(broadcastId, provider), "utf8");
       const parsed = JSON.parse(content) as RecordingSession;
       return parsed?.sessionId ? parsed : undefined;
     } catch {
@@ -415,9 +525,28 @@ export class ChatRecorder {
     }
   }
 
-  private async writeMeta(session: RecordingSession) {
-    await mkdir(this.dataDir, { recursive: true });
-    await writeFile(this.metaFilePath(session.sessionId), `${JSON.stringify(session, null, 2)}\n`, "utf8");
+  private async writeProviderMeta(session: RecordingSession) {
+    const location = this.locate(session.sessionId);
+    if (!location) {
+      return;
+    }
+    await this.ensureDir(this.paths.chatDir(location.broadcastId, location.provider));
+    await writeFile(this.paths.metaFilePath(location.broadcastId, location.provider), `${JSON.stringify(session, null, 2)}\n`, "utf8");
+  }
+
+  private async readBroadcastMeta(broadcastId: string): Promise<BroadcastSession | undefined> {
+    try {
+      const content = await readFile(this.paths.broadcastMetaPath(broadcastId), "utf8");
+      const parsed = JSON.parse(content) as BroadcastSession;
+      return parsed?.broadcastId ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async writeBroadcastMeta(session: BroadcastSession) {
+    await this.ensureDir(this.paths.broadcastDir(session.broadcastId));
+    await writeFile(this.paths.broadcastMetaPath(session.broadcastId), `${JSON.stringify(session, null, 2)}\n`, "utf8");
   }
 
   private scheduleMetaWrite(session: RecordingSession) {
@@ -437,61 +566,96 @@ export class ChatRecorder {
     this.dirtyMeta.clear();
     for (const session of pending) {
       try {
-        await this.writeMeta(session);
+        await this.writeProviderMeta(session);
       } catch {
         // 다음 flush 주기에 다시 시도된다.
       }
     }
   }
 
+  /** 디스크 메타 패치를 인메모리 활성 세션/대기 중 flush 사본에도 동기화 */
+  private applyMetaPatchToActiveSession(sessionId: string, patch: Partial<RecordingSession>) {
+    if (this.activeBroadcast) {
+      for (const [provider, active] of this.activeBroadcast.providers) {
+        if (active.sessionId === sessionId) {
+          this.activeBroadcast.providers.set(provider, { ...active, ...patch });
+        }
+      }
+    }
+    const pending = this.dirtyMeta.get(sessionId);
+    if (pending) {
+      this.dirtyMeta.set(sessionId, { ...pending, ...patch });
+    }
+  }
+
+  // ── 내부: 카운트·경로·직렬화 ───────────────────────────────────────
+
   private async withActualMessageCount(session: RecordingSession) {
-    const messageCount = await this.countReadableRecords(session.sessionId);
+    const messageCount = await this.countReadableRecords(session);
     return { ...session, messageCount };
   }
 
-  private async countReadableRecords(sessionId: string) {
-    const safeSessionId = sanitizeSessionId(sessionId);
-    const filePath = this.sessionFilePath(safeSessionId);
+  private async countReadableRecords(session: RecordingSession) {
+    const location = this.locate(session.sessionId);
+    if (!location) {
+      return 0;
+    }
+    const filePath = this.paths.chatFilePath(location.broadcastId, location.provider);
     let fileStat;
     try {
       fileStat = await stat(filePath);
     } catch {
       return 0;
     }
-
-    const cached = this.countCache.get(safeSessionId);
+    const cached = this.countCache.get(session.sessionId);
     if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
       return cached.count;
     }
-
     const content = await readFile(filePath, "utf8");
     const count = content
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean)
       .reduce((total, line) => total + (parseRecord(line) ? 1 : 0), 0);
-    this.countCache.set(safeSessionId, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, count });
+    this.countCache.set(session.sessionId, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, count });
     return count;
   }
 
-  private sessionFilePath(sessionId: string) {
-    return path.join(this.dataDir, `${sanitizeSessionId(sessionId)}.jsonl`);
+  /** 합성 sessionId를 검증된 broadcastId+provider로 되돌린다(경로 이탈 방지 sanitize 포함). */
+  private locate(sessionId: string): SessionLocation | undefined {
+    const parsed = parseSessionKey(sessionId);
+    if (!parsed) {
+      return undefined;
+    }
+    const broadcastId = sanitizeSegment(parsed.broadcastId);
+    if (!broadcastId) {
+      return undefined;
+    }
+    return { broadcastId, provider: parsed.provider };
   }
 
-  private metaFilePath(sessionId: string) {
-    return path.join(this.dataDir, `${sanitizeSessionId(sessionId)}.meta.json`);
+  private queueAppend(filePath: string, line: string) {
+    this.writeQueue = this.writeQueue
+      .then(() => this.ensureDir(path.dirname(filePath)))
+      .then(() => appendFile(filePath, line, "utf8"))
+      .catch((error) => {
+        console.error("[recorder] 채팅 저장 실패:", error instanceof Error ? error.message : error);
+      });
   }
 
-  private highlightsFilePath(sessionId: string) {
-    return path.join(this.dataDir, `${sanitizeSessionId(sessionId)}.highlights.json`);
+  /** 세션 경로 아래에 JSON 파일 하나를 통째로 쓴다(마커·하이라이트 공용). loc이 없으면 무시. */
+  private async writeJsonForSession(sessionId: string, resolvePath: (location: SessionLocation) => string, value: unknown) {
+    const location = this.locate(sessionId);
+    if (!location) {
+      return;
+    }
+    const filePath = resolvePath(location);
+    await this.ensureDir(path.dirname(filePath));
+    await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   }
 
-  private viewersFilePath(sessionId: string) {
-    return path.join(this.dataDir, `${sanitizeSessionId(sessionId)}.viewers.jsonl`);
-  }
-
-  private markersFilePath(sessionId: string) {
-    return path.join(this.dataDir, `${sanitizeSessionId(sessionId)}.markers.json`);
+  private async ensureDir(dir: string) {
+    await mkdir(dir, { recursive: true });
   }
 }
 
@@ -511,35 +675,19 @@ function providerLabel(provider: ChatProvider) {
   return provider === "soop" ? "SOOP" : "CHZZK";
 }
 
-export function buildSessionId(timestamp: number, provider: ChatMessage["provider"], channelId: string) {
-  return `${formatSessionTimestamp(timestamp)}-${provider}-${sanitizeFilePart(channelId || "unknown")}`;
-}
-
-export function sanitizeFilePart(input: string) {
-  const sanitized = input
-    .normalize("NFKD")
-    .replace(/[^\w-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-  return sanitized || "unknown";
-}
-
-function sanitizeSessionId(input: string) {
-  return input
-    .normalize("NFKD")
-    .replace(/[^\w-]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "unknown";
+/** 경로 세그먼트에서 `..`·구분자 등 위험 문자를 제거한다(디렉토리 이탈 방지). */
+function sanitizeSegment(input: string) {
+  return (
+    input
+      .normalize("NFKD")
+      .replace(/[^\w-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || ""
+  );
 }
 
 function sanitizeDisplayName(input: string | undefined) {
   const trimmed = input?.trim().slice(0, 80);
   return trimmed || undefined;
-}
-
-function formatSessionTimestamp(timestamp: number) {
-  const date = new Date(timestamp);
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
 function serializeRecord(record: ChatRecord): SerializedRecord {
