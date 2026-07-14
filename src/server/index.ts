@@ -292,6 +292,8 @@ function scheduleAutoStopIfBroadcastEnded() {
   });
   if (!anyLive) {
     recordingGrace.schedule();
+    recorder.setAutoStopPending(true);
+    emitRecordingStatus();
   }
 }
 
@@ -309,6 +311,7 @@ function createProviderCallbacks(): ProviderCallbacks {
       // provider가 (다시) 붙으면 녹화 자동종료 유예를 취소한다 — 같은 방송으로 이어간다.
       if ((status.state === "connected" || status.state === "reconnecting") && recordingGrace.isPending()) {
         recordingGrace.cancel();
+        recorder.setAutoStopPending(false);
         emitRecordingStatus();
       }
       if (status.state === "offline" && wasActive) {

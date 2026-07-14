@@ -116,6 +116,18 @@ describe("chat recorder — 방송 라이프사이클", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  it("자동종료 유예(grace) 표시를 녹화 상태에 반영한다", async () => {
+    const dir = await makeTempDir();
+    const recorder = new ChatRecorder(dir);
+    await recorder.startRecording([chzzkRef()]);
+    expect(recorder.getStatus().recordingState).toBe("recording");
+    recorder.setAutoStopPending(true);
+    expect(recorder.getStatus().recordingState).toBe("grace");
+    await recorder.stopRecording();
+    expect(recorder.getStatus().recordingState).toBe("idle");
+    await rm(dir, { recursive: true, force: true });
+  });
+
   it("provider가 없으면 녹화를 시작하지 않는다", async () => {
     const dir = await makeTempDir();
     const recorder = new ChatRecorder(dir);

@@ -48,6 +48,8 @@ interface SerializedRecord {
 export class ChatRecorder {
   private readonly paths: BroadcastPaths;
   private activeBroadcast: ActiveBroadcast | undefined;
+  // 자동종료 유예(grace) 여부 — 타이머는 index.ts가 소유하고, 상태 방출용으로 이 플래그를 알려준다.
+  private autoStopPending = false;
   private sequences = new Map<ChatProvider, number>();
   private lastRecordAt: number | undefined;
   private latestActiveProvider: ChatProvider | undefined;
@@ -71,6 +73,14 @@ export class ChatRecorder {
   }
 
   /**
+   * 자동종료 유예(grace) 진입/해제를 상태 방출에 반영한다. recorder는 grace 타이머를 소유하지 않으므로
+   * 정책 주체(index.ts)가 schedule/cancel 시점에 알려준다 — getStatus의 recordingState가 "grace"로 나가게 한다.
+   */
+  setAutoStopPending(pending: boolean) {
+    this.autoStopPending = pending;
+  }
+
+  /**
    * 녹화를 시작한다 — broadcastId를 발급하고 방송/ provider 디렉토리와 메타를 연다.
    * 이미 녹화 중이면 현재 방송을 그대로 반환(idempotent). provider가 하나도 없으면 시작하지 않는다.
    */
@@ -89,6 +99,7 @@ export class ChatRecorder {
     };
     this.sequences.clear();
     this.latestActiveProvider = undefined;
+    this.autoStopPending = false;
     await mkdir(this.paths.broadcastDir(broadcastId), { recursive: true });
     for (const ref of providers) {
       await this.openProviderSession(ref, startedAt);
@@ -103,6 +114,11 @@ export class ChatRecorder {
     if (!active) {
       return undefined;
     }
+    // 먼저 활성 상태를 비워, 종료 처리 중 도착하는 메시지가 endedAt 이후에 append되지 않게 한다
+    // (recordMessage는 activeBroadcast가 없으면 디스크에 쓰지 않는다). 그다음 이미 큐에 쌓인
+    // 쓰기를 모두 흘려보내고 종료 메타를 기록한다.
+    this.activeBroadcast = undefined;
+    this.autoStopPending = false;
     await this.writeQueue;
     const endedAt = Date.now();
     for (const session of active.providers.values()) {
@@ -111,7 +127,6 @@ export class ChatRecorder {
     }
     const endedBroadcast: BroadcastSession = { ...active.session, endedAt };
     await this.writeBroadcastMeta(endedBroadcast);
-    this.activeBroadcast = undefined;
     this.sequences.clear();
     this.latestActiveProvider = undefined;
     return endedBroadcast;
@@ -172,7 +187,11 @@ export class ChatRecorder {
 
   getStatus(): RecordingStatus {
     const activeSessions = this.getActiveSessions();
-    const recordingState: RecordingState = this.activeBroadcast ? "recording" : "idle";
+    const recordingState: RecordingState = this.activeBroadcast
+      ? this.autoStopPending
+        ? "grace"
+        : "recording"
+      : "idle";
     return {
       enabled: true,
       dataDir: this.dataDir,
