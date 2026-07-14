@@ -5,7 +5,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { Server } from "socket.io";
 import { LiveAnalytics } from "./analytics";
-import { config } from "./config";
+import { config, RECORD_GRACE_MS } from "./config";
 import { ChzzkOfficialAdapter } from "./providers/chzzkOfficial";
 import { ChzzkUnofficialAdapter } from "./providers/chzzkUnofficial";
 import type { ChzzkTokenSet, ProviderAdapter, ProviderCallbacks } from "./providers/types";
@@ -16,6 +16,7 @@ import { resolveFrameChannelInput } from "./frameChannel";
 import { getFfmpegReadiness, probeFfmpeg } from "./ffmpegRuntime";
 import { CAPTURE_READY_TIMEOUT_MS, planFromReadiness, type CaptureReadiness } from "../shared/captureReadiness";
 import { ChatRecorder } from "./recorder";
+import { RecordingGrace } from "./broadcast/recordingGrace";
 import { AppState, type AppSocketServer } from "./state";
 import { persistChzzkToken, readStoredChzzkToken } from "./chzzkTokenStore";
 import { registerAnalyticsRoutes } from "./routes/analytics";
@@ -23,6 +24,7 @@ import { registerAuthRoutes } from "./routes/auth";
 import { registerProviderRoutes } from "./routes/providers";
 import { registerFrameRoutes } from "./routes/frames";
 import type {
+  BroadcastProviderRef,
   ChatMessage,
   ChatProvider,
   ConnectProviderRequest,
@@ -68,6 +70,11 @@ const state = new AppState(io, {
   onMessage: (message) => {
     void handleRecordedMessage(message);
   }
+});
+
+// 녹화 자동 종료 유예 — 방송 종료(모든 provider offline) 감지 후 RECORD_GRACE_MS 뒤 녹화를 자동 확정한다.
+const recordingGrace = new RecordingGrace(RECORD_GRACE_MS, () => {
+  void finalizeRecording("방송 종료가 감지되어 녹화를 자동 종료했습니다.");
 });
 
 const currentAdapters = new Map<ChatProvider, ProviderAdapter>();
@@ -178,6 +185,14 @@ io.on("connection", (socket) => {
   socket.on("provider:disconnect", (request) => {
     void disconnectProvider(request?.provider ?? state.getStatus().provider);
   });
+
+  socket.on("recording:start", () => {
+    void startRecording();
+  });
+
+  socket.on("recording:stop", () => {
+    void stopRecording();
+  });
 });
 
 // 부팅 워밍업 — ffmpeg 준비 상태를 1회 프로브해 캐시한다 (연결 시 매번 spawn하지 않도록).
@@ -188,6 +203,8 @@ await app.listen({ host: config.host, port: config.port });
 
 async function handleRecordedMessage(message: ChatMessage) {
   try {
+    // 녹화 여부와 무관하게 non-mock 메시지는 record를 돌려받아 라이브 분석에 먹인다
+    // (연결=대시보드 표시가 녹화와 분리되었으므로). 디스크 저장은 recordMessage 내부에서 녹화 중일 때만.
     const record = await recorder.recordMessage(message);
     if (!record) {
       return;
@@ -195,13 +212,86 @@ async function handleRecordedMessage(message: ChatMessage) {
 
     liveAnalytics.append(record);
     analyticsDirty = true;
-    recordingStatusDirty = true;
+    if (recorder.isRecording()) {
+      recordingStatusDirty = true;
+    }
   } catch (error) {
     app.log.error(error, "채팅 저장 중 오류가 발생했습니다.");
     io.emit("recording:status", {
       ...recorder.getStatus(),
       message: error instanceof Error ? error.message : "채팅 저장 중 오류가 발생했습니다."
     });
+  }
+}
+
+// ── 녹화 라이프사이클 오케스트레이션 ──────────────────────────────────
+
+/** 연결된(=어댑터가 붙은) provider들을 하나의 방송으로 묶어 녹화를 시작한다. */
+async function startRecording() {
+  const providers = connectedProviderRefs();
+  if (providers.length === 0) {
+    appendProviderLog({
+      provider: state.getStatus().provider,
+      level: "warning",
+      message: "연결된 소스가 없어 녹화를 시작하지 못했습니다."
+    });
+    return;
+  }
+  recordingGrace.cancel();
+  const broadcast = await recorder.startRecording(providers);
+  if (broadcast) {
+    appendProviderLog({
+      provider: providers[0].provider,
+      level: "success",
+      message: `녹화를 시작했습니다 (${broadcast.broadcastId}).`
+    });
+    emitRecordingStatus();
+  }
+}
+
+/** 수동 녹화 종료 — 유예 타이머를 취소하고 즉시 확정한다. */
+async function stopRecording() {
+  recordingGrace.cancel();
+  await finalizeRecording("녹화를 종료했습니다.");
+}
+
+/** 실제 녹화 종료 처리(수동·자동 공용) — recorder.stopRecording 후 상태를 emit한다. */
+async function finalizeRecording(message: string) {
+  const ended = await recorder.stopRecording();
+  if (ended) {
+    appendProviderLog({ provider: ended.providers[0]?.provider ?? "chzzk", level: "info", message });
+    emitRecordingStatus();
+  }
+}
+
+function emitRecordingStatus() {
+  io.emit("recording:status", recorder.getStatus());
+  io.emit("analytics:live", liveAnalytics.getSummary(recorder.getActiveSession()));
+}
+
+/** 현재 어댑터가 붙어 있는(connected/reconnecting) provider들을 방송 참여자로 모은다. */
+function connectedProviderRefs(): BroadcastProviderRef[] {
+  const refs: BroadcastProviderRef[] = [];
+  for (const provider of ["chzzk", "soop"] as const) {
+    const status = state.getStatus(provider);
+    if (status.state === "connected" || status.state === "reconnecting") {
+      refs.push({ provider, sourceMode: status.sourceMode, channelId: status.channelId ?? "" });
+    }
+  }
+  return refs;
+}
+
+/** 녹화 중 모든 provider가 offline이면(=방송 종료) 자동종료 유예 타이머를 건다. */
+function scheduleAutoStopIfBroadcastEnded() {
+  if (!recorder.isRecording()) {
+    return;
+  }
+  const anyLive = (["chzzk", "soop"] as const).some((provider) => {
+    const providerState = state.getStatus(provider).state;
+    return providerState === "connected" || providerState === "reconnecting";
+  });
+  if (!anyLive) {
+    recordingGrace.schedule();
   }
 }
 
@@ -216,6 +306,11 @@ function createProviderCallbacks(): ProviderCallbacks {
       const wasActive = previousState === "connected" || previousState === "reconnecting";
       state.setStatus(status);
       appendStatusLog(status);
+      // provider가 (다시) 붙으면 녹화 자동종료 유예를 취소한다 — 같은 방송으로 이어간다.
+      if ((status.state === "connected" || status.state === "reconnecting") && recordingGrace.isPending()) {
+        recordingGrace.cancel();
+        emitRecordingStatus();
+      }
       if (status.state === "offline" && wasActive) {
         appendProviderLog({
           provider: status.provider,
@@ -225,6 +320,8 @@ function createProviderCallbacks(): ProviderCallbacks {
           message: "방송 종료가 감지되어 연결을 자동으로 해제합니다."
         });
         void disconnectProvider(status.provider);
+        // 연결은 즉시 해제하되, 녹화는 모든 provider가 offline일 때만 유예 뒤 자동 종료한다.
+        scheduleAutoStopIfBroadcastEnded();
       }
     },
     onViewerCount: (provider, count) => {
@@ -416,11 +513,7 @@ async function disconnectProvider(
   } else if (provider === "soop") {
     await frameCaptureSoop.stop();
   }
-  const endedSession = await recorder.endSession(provider);
-  if (endedSession) {
-    io.emit("recording:status", recorder.getStatus());
-    io.emit("analytics:live", liveAnalytics.getSummary(recorder.getActiveSession()));
-  }
+  // 연결 해제는 더 이상 녹화를 끝내지 않는다(연결 ⊥ 녹화). 녹화 종료는 수동 stop 또는 grace 자동종료로만.
 
   if (updateStatus) {
     const previousStatus = state.getStatus(provider);

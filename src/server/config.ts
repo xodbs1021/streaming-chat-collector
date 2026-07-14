@@ -32,6 +32,12 @@ export const config: AppConfig = {
   chatDataDir: process.env.CHAT_DATA_DIR ?? "./data/chat-sessions"
 };
 
+/**
+ * 방송 종료(모든 provider offline) 감지 후 자동으로 녹화를 종료하기까지의 유예 시간.
+ * 짧은 끊김/재접속에 세션이 둘로 쪼개지지 않도록 이 시간만큼 기다렸다가 확정한다.
+ */
+export const RECORD_GRACE_MS = 3 * 60_000;
+
 export const CHZZK_OPEN_API_BASE = "https://openapi.chzzk.naver.com";
 export const CHZZK_ACCOUNT_INTERLOCK_URL = "https://chzzk.naver.com/account-interlock";
 export const CHZZK_HOME_URL = "https://chzzk.naver.com/";
