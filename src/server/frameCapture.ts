@@ -201,7 +201,8 @@ export class FrameCaptureManager {
   private readonly assigner = new FrameSecondAssigner();
 
   constructor(
-    private readonly framesDir: string,
+    // 캡처 대상 폴더. start(channelId, framesDir)로 방송마다 재주입된다(미주입 시 이 기본값 유지).
+    private framesDir: string,
     private readonly resolveHlsUrl: HlsUrlResolver,
     private readonly log: FrameCaptureLogger,
     // 부팅 프로브 결과 주입 — "known missing"이면 spawn 없이 즉시 프라이밍한다.
@@ -216,10 +217,20 @@ export class FrameCaptureManager {
     return process.env.FRAME_CAPTURE !== "0";
   }
 
-  async start(channelId: string) {
+  /**
+   * 캡처를 시작한다. framesDir를 주면 이 방송의 대상 폴더로 재주입한다(방송마다 다른 폴더).
+   * 비활성/빈 채널이면 아무것도 하지 않는다 — 이 skip 경로는 framesDir·인메모리 상태를 건드리지 않는다(진짜 no-op).
+   */
+  async start(channelId: string, framesDir?: string) {
     if (!this.isEnabled() || !channelId) {
       return;
     }
+    // guard 통과 후에만 대상 폴더 재주입 + 방송 경계 리셋 — 새 방송이 옛 인덱스/갭필 상태를 물려받지 않게 한다.
+    if (framesDir) {
+      this.framesDir = framesDir;
+    }
+    this.frameSeconds = [];
+    this.assigner.reset();
     this.stopped = false;
     this.channelId = channelId;
     this.restartAttempts = 0;
@@ -258,6 +269,8 @@ export class FrameCaptureManager {
 
   async stop() {
     this.stopped = true;
+    // 비녹화(=캡처 중단) 동안 읽기 인덱스를 비운다 — 라이브 매니저 경유 read가 이전 방송 프레임을 계속 노출하지 않도록.
+    this.frameSeconds = [];
     // 해제 후 잔류 사유/카운터가 거짓 상태를 표시하지 않도록 클리어 (start()에서만 리셋되던 것을 보완)
     this.lastFailureReason = undefined;
     this.restartAttempts = 0;
@@ -515,6 +528,11 @@ export class FrameCaptureManager {
         .map((entry) => Number(entry.replace(/\.jpg$/, "")))
         .filter((second) => Number.isFinite(second))
         .sort((left, right) => left - right);
+      // stop()이 인덱스를 비우고 타이머를 끈 뒤 도착한 in-flight readdir이 옛 방송 목록으로
+      // 되돌리지 않도록 — 중단됐으면 버린다("비녹화=빈 인덱스" 계약을 레이스에 강건하게).
+      if (this.stopped) {
+        return;
+      }
       if (seconds.length > this.frameSeconds.length) {
         // 새 프레임이 쌓이고 있으면 캡처가 살아있다는 뜻 — 백오프 리셋 + 정체 감시 타이머 리셋 + 사유 클리어
         this.restartAttempts = 0;

@@ -4,7 +4,8 @@ import type { ChatProvider } from "../../shared/types";
 /**
  * 방송 세션 레이아웃의 파일 경로 단일 진실원.
  * `<root>/<broadcastId>/broadcast.meta.json` +
- * `<root>/<broadcastId>/chat/<provider>/{chat.jsonl,meta.json,viewers.jsonl,markers.json,highlights.json}`.
+ * `<root>/<broadcastId>/chat/<provider>/{chat.jsonl,meta.json,viewers.jsonl,markers.json,highlights.json}` +
+ * `<root>/<broadcastId>/frame/<provider>/<epoch초>.jpg`.
  * 경로 규칙을 한 곳에 모아, 레이아웃이 바뀌어도 이 클래스만 고치면 되게 한다.
  */
 export class BroadcastPaths {
@@ -20,6 +21,10 @@ export class BroadcastPaths {
 
   chatDir(broadcastId: string, provider: ChatProvider): string {
     return path.join(this.broadcastDir(broadcastId), "chat", provider);
+  }
+
+  frameDir(broadcastId: string, provider: ChatProvider): string {
+    return path.join(this.broadcastDir(broadcastId), "frame", provider);
   }
 
   chatFilePath(broadcastId: string, provider: ChatProvider): string {
