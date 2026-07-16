@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 채팅 시스템 하네스 훅 공용 모듈. 각 훅 스크립트가 source 한다.
+# 하네스 훅 공용 모듈. 각 훅 스크립트가 source 한다. (도메인-무관 재사용 템플릿)
 #
 # set -e 를 쓰지 않는다: 훅이 예기치 않게 죽으면 세션이 막히거나(Stop)
 # 멀쩡한 명령이 차단된다(PreToolUse). 모든 종료는 명시적으로 한다.
@@ -15,10 +15,10 @@ BLOCK_COUNT="$STATE_DIR/.stop-block-count"
 MAX_BLOCKS=3
 
 # 탈출구.
-#   CHAT_HOOKS=off                            → 세 훅 모두 비활성
+#   HARNESS_HOOKS=off                         → 세 훅 모두 비활성
 #   ECC_DISABLED_HOOKS=stop:verify,...        → id 로 개별 비활성
 hook_disabled() {
-  if [ "${CHAT_HOOKS:-}" = "off" ]; then
+  if [ "${HARNESS_HOOKS:-}" = "off" ]; then
     return 0
   fi
   case ",${ECC_DISABLED_HOOKS:-}," in
