@@ -64,6 +64,22 @@ describe("FrameSecondAssigner", () => {
     expect(second.second).toBe(502);
   });
 
+  it("방송 경계 reset()은 lastFrame까지 버려 새 방송이 이전 방송 프레임을 갭필로 복제하지 않는다", () => {
+    const assigner = new FrameSecondAssigner();
+    // 이전 방송 마지막 프레임 = 초 100.
+    expect(assigner.assign(100, FRAME).second).toBe(100);
+
+    // 방송 경계 리셋 — resetSpawn과 달리 갭필 소스(lastFrameSec/lastFrameBuffer)까지 비운다.
+    assigner.reset();
+    expect(assigner.getLastFrameBuffer()).toBeUndefined();
+
+    // 새 방송 첫 프레임이 초 102에 와도(짧은 공백 범위지만 이전 방송 소속) 101을 복제 갭필하지 않는다.
+    // 같은 시나리오에서 resetSpawn()이었다면 fills === [101]로 이전 방송 프레임이 새 폴더에 유입됐을 것.
+    const result = assigner.assign(102, FRAME);
+    expect(result.second).toBe(102);
+    expect(result.fills).toEqual([]);
+  });
+
   it("exposes the previous frame buffer as the gap-fill source before assign updates it", () => {
     const assigner = new FrameSecondAssigner();
     const older = Buffer.from([0x01]);

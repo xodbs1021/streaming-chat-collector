@@ -39,6 +39,11 @@ describe("BroadcastPaths", () => {
     expect(paths.metaFilePath("bid", "chzzk")).toBe("/data/bid/chat/chzzk/meta.json");
     expect(paths.viewersFilePath("bid", "soop")).toBe("/data/bid/chat/soop/viewers.jsonl");
   });
+
+  it("프레임 폴더를 방송/provider별로 조립한다 (chat과 형제)", () => {
+    expect(paths.frameDir("bid", "chzzk")).toBe("/data/bid/frame/chzzk");
+    expect(paths.frameDir("bid", "soop")).toBe("/data/bid/frame/soop");
+  });
 });
 
 describe("RecordingGrace", () => {

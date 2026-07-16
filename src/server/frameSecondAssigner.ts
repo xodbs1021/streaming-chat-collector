@@ -62,6 +62,18 @@ export class FrameSecondAssigner {
     this.ordinal = 0;
   }
 
+  /**
+   * 방송 경계 리셋: 모든 상태를 완전히 비운다(resetSpawn과 달리 lastFrame도 버린다).
+   * 새 방송은 새 디렉토리로 캡처하므로, 직전 방송의 마지막 프레임이 새 방송 첫 프레임의
+   * 갭필 소스로 복제 유입되지 않도록 lastFrameSec/lastFrameBuffer까지 초기화한다.
+   */
+  reset(): void {
+    this.baseEpochSec = undefined;
+    this.ordinal = 0;
+    this.lastFrameSec = undefined;
+    this.lastFrameBuffer = undefined;
+  }
+
   /** 재접속 첫 프레임 한정: 직전 초와의 짧은 공백을 메울 초 목록을 만든다. */
   private computeGapFills(second: number): number[] {
     if (this.lastFrameSec === undefined) {
