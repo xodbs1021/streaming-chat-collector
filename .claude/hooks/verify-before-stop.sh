@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Stop: 코드를 건드린 턴은 (1) 타입체크 통과 (2) completion-auditor 실행
-#       없이는 끝낼 수 없다.
+# Stop: 코드를 건드린 턴은 (1) 타입체크 통과 (2) change-explainer 실행
+#       (3) completion-auditor 실행 없이는 끝낼 수 없다.
 #
 # 무한루프 가드: 같은 턴을 MAX_BLOCKS(3)회까지만 막는다. 소진되면 플래그를
 # 지우고 통과시키되 사용자에게 큰 경고를 띄운다. 세션이 벽돌이 되는 것보다
@@ -16,7 +16,7 @@ hook_disabled "$HOOK_ID" && exit 0
 payload="$(cat)"
 stop_active="$(printf '%s' "$payload" | json_get stop_hook_active)"
 
-# (1) 코드 변경이 없는 턴 → 검사 전부 생략. 읽기 전용 질문에 tsc 를 돌리지 않는다.
+# (1) 코드 변경이 없는 턴 → 검사 전부 생략. 읽기 전용 질문에 타입체크를 돌리지 않는다.
 #     두 게이트 플래그(감사·설명)가 모두 비어야 "할 일 없음"이다.
 if [ ! -s "$AUDIT_FLAG" ] && [ ! -s "$EXPLAIN_FLAG" ]; then
   rm -f "$BLOCK_COUNT" 2>/dev/null
@@ -48,11 +48,18 @@ bump_and_block() {
   exit 2
 }
 
-# (3) 타입체크 — 결정론적 바닥. 감사자가 뭘 하든 컴파일 실패는 무조건 걸린다.
+# (3) 타입체크 — 결정론적 바닥. 명령은 프로필에서 파생된 harness.env 에서 읽는다.
+#     HARNESS_TYPECHECK_CMD 가 비어 있으면(타입 없는 언어/미설정) 생략한다.
+#     이렇게 하면 이 훅이 특정 스택(pnpm/tsc)에 묶이지 않는다 — 도메인-무관 재사용.
 typecheck_note=""
-if [ ! -d "$PROJECT_DIR/node_modules" ] || ! command -v pnpm >/dev/null 2>&1; then
-  # 의존성이 없으면 tsc 가 rc=127 로 죽는다. 이걸 타입 오류로 오인하면 오탐 차단이 된다.
-  typecheck_note="타입체크 생략 (node_modules 또는 pnpm 없음)"
+if [ -f "$STATE_DIR/harness/harness.env" ]; then
+  # shellcheck disable=SC1091
+  . "$STATE_DIR/harness/harness.env" 2>/dev/null
+fi
+TYPECHECK_CMD="${HARNESS_TYPECHECK_CMD:-}"
+
+if [ -z "$TYPECHECK_CMD" ]; then
+  typecheck_note="타입체크 생략 (harness.env 에 HARNESS_TYPECHECK_CMD 미설정)"
 else
   timeout_bin=""
   if command -v timeout >/dev/null 2>&1; then
@@ -62,26 +69,28 @@ else
   fi
   # macOS 기본에는 timeout 이 없다. 그 경우 settings.json 의 "timeout": 120 이 최종 안전망.
 
-  mkdir -p "$PROJECT_DIR/node_modules/.cache" 2>/dev/null
-  tsc_argv=(exec tsc --noEmit --incremental --tsBuildInfoFile node_modules/.cache/tsc-hook.tsbuildinfo)
-
   if [ -n "$timeout_bin" ]; then
-    tsc_out="$(cd "$PROJECT_DIR" && "$timeout_bin" 90 pnpm "${tsc_argv[@]}" 2>&1)"; tsc_rc=$?
+    tc_out="$(cd "$PROJECT_DIR" && "$timeout_bin" 90 sh -c "$TYPECHECK_CMD" 2>&1)"; tc_rc=$?
   else
-    tsc_out="$(cd "$PROJECT_DIR" && pnpm "${tsc_argv[@]}" 2>&1)"; tsc_rc=$?
+    tc_out="$(cd "$PROJECT_DIR" && sh -c "$TYPECHECK_CMD" 2>&1)"; tc_rc=$?
   fi
 
-  if [ "$tsc_rc" -eq 124 ] || [ "$tsc_rc" -eq 137 ]; then
+  if [ "$tc_rc" -eq 124 ] || [ "$tc_rc" -eq 137 ]; then
     # 타임아웃은 "타입 오류"가 아니라 "모름". 차단하지 않고 감사자에게 넘긴다.
     typecheck_note="타입체크 타임아웃 → 생략 (감사자가 재확인할 것)"
-  elif [ "$tsc_rc" -ne 0 ]; then
+  elif [ "$tc_rc" -eq 127 ]; then
+    # 명령/도구 없음(rc=127)은 "타입 오류"가 아니다. 오탐 차단 방지 위해 생략.
+    typecheck_note="타입체크 생략 (명령 실행 불가 rc=127): $TYPECHECK_CMD"
+  elif [ "$tc_rc" -ne 0 ]; then
     {
       echo "[완료 차단] 타입체크 실패 — 지금은 '완료'가 아닙니다."
       echo
-      printf '%s\n' "$tsc_out" | head -n 15
+      echo "명령: $TYPECHECK_CMD"
+      echo
+      printf '%s\n' "$tc_out" | head -n 15
       echo
       echo "고친 뒤 다시 종료하세요.  (차단 $((count + 1))/${MAX_BLOCKS})"
-      echo "탈출구: CHAT_HOOKS=off  또는  ECC_DISABLED_HOOKS=$HOOK_ID"
+      echo "탈출구: HARNESS_HOOKS=off  또는  ECC_DISABLED_HOOKS=$HOOK_ID"
     } >&2
     bump_and_block
   fi
@@ -103,7 +112,7 @@ if [ -s "$EXPLAIN_FLAG" ] && ! hook_disabled "stop:explain"; then
     echo "  2. 설명을 낸 뒤에만:  rm -f .claude/.needs-explain"
     echo "     설명 없이 플래그만 지우는 것은 이 게이트의 존재 이유를 없앤다."
     echo
-    echo "차단 $((count + 1))/${MAX_BLOCKS}.  탈출구: CHAT_HOOKS=off  또는  ECC_DISABLED_HOOKS=stop:explain"
+    echo "차단 $((count + 1))/${MAX_BLOCKS}.  탈출구: HARNESS_HOOKS=off  또는  ECC_DISABLED_HOOKS=stop:explain"
   } >&2
   bump_and_block
 fi
@@ -124,6 +133,6 @@ fi
   echo "  2. 검증을 통과했을 때만:  rm -f .claude/.needs-audit"
   echo "     감사 없이 플래그만 지우는 것은 이 게이트의 존재 이유를 없앤다."
   echo
-  echo "차단 $((count + 1))/${MAX_BLOCKS}.  탈출구: CHAT_HOOKS=off  또는  ECC_DISABLED_HOOKS=$HOOK_ID"
+  echo "차단 $((count + 1))/${MAX_BLOCKS}.  탈출구: HARNESS_HOOKS=off  또는  ECC_DISABLED_HOOKS=$HOOK_ID"
 } >&2
 bump_and_block
