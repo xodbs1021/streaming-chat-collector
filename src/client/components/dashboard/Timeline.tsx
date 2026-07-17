@@ -22,6 +22,7 @@ import { FramePreview } from "./FramePreview";
 
 export function Timeline({
   focusRange,
+  frameBroadcastId,
   frameIndexLoaded,
   frameSecondsByProvider,
   markers,
@@ -33,6 +34,8 @@ export function Timeline({
   onSelectionChange
 }: {
   focusRange?: TimelineSelection;
+  /** 종료된 과거 세션이면 그 방송 id — 프레임을 과거 방송 주소로 읽는다(없으면 라이브). */
+  frameBroadcastId?: string;
   frameIndexLoaded: boolean;
   frameSecondsByProvider: Partial<Record<ChatProvider, number[]>>;
   markers: TimelineMarker[];
@@ -351,6 +354,7 @@ export function Timeline({
           {hoveredFrameSecond !== undefined && (
             <FramePreview
               key={hoveredProvider}
+              broadcastId={frameBroadcastId}
               fallbackProvider={otherProvider(hoveredProvider)}
               provider={hoveredProvider}
               second={hoveredFrameSecond}

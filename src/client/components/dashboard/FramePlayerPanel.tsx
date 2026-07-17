@@ -11,12 +11,15 @@ import { FramePreview } from "./FramePreview";
 export function FramePlayerPanel({
   range,
   windows,
+  frameBroadcastId,
   frameSecondsByProvider,
   frameCaptureStatusByProvider,
   frameIndexLoaded
 }: {
   range: TimelineSelection;
   windows: AnalyticsWindow[];
+  /** 종료된 과거 세션이면 그 방송 id — 프레임을 과거 방송 주소로 읽는다(없으면 라이브). */
+  frameBroadcastId?: string;
   frameSecondsByProvider: Partial<Record<ChatProvider, number[]>>;
   frameCaptureStatusByProvider?: Partial<Record<ChatProvider, FrameCaptureStatus>>;
   frameIndexLoaded: boolean;
@@ -93,7 +96,7 @@ export function FramePlayerPanel({
       {second !== undefined ? (
         <>
           {/* key는 provider 단위 — 프레임(second)마다 remount하면 <img>가 새로 생겨 로드 전 빈 화면이 깜빡인다 */}
-          <FramePreview key={activeProvider} large provider={activeProvider} second={second} />
+          <FramePreview key={activeProvider} broadcastId={frameBroadcastId} large provider={activeProvider} second={second} />
           <time className="frame-timestamp" dateTime={new Date(second * 1000).toISOString()}>
             {formatFrameTimestamp(second)}
           </time>
