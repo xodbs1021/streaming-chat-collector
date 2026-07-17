@@ -41,23 +41,24 @@ export class BroadcastFrameReader {
       return [];
     }
     const frameDir = this.paths.frameDir(broadcastId, provider);
-    let dirStat;
+    // readdir도 같은 자기 치유 범위에 둔다 — stat 성공 직후 세션 삭제가 폴더를 지우는 레이스에서
+    // readdir ENOENT가 위로 던져지면 라우트가 500(경로 노출)이 되므로, 오류는 전부 빈 결과로 수렴시킨다.
     try {
-      dirStat = await stat(frameDir);
+      const dirStat = await stat(frameDir);
+      const cached = this.cache.get(frameDir);
+      if (cached && cached.mtimeMs === dirStat.mtimeMs) {
+        return cached.seconds;
+      }
+      const entries = await readdir(frameDir);
+      const seconds = entries
+        .filter((name) => FRAME_FILE_PATTERN.test(name))
+        .map((name) => Number.parseInt(name, 10))
+        .sort((left, right) => left - right);
+      this.cache.set(frameDir, { mtimeMs: dirStat.mtimeMs, seconds });
+      return seconds;
     } catch {
       this.cache.delete(frameDir);
       return [];
     }
-    const cached = this.cache.get(frameDir);
-    if (cached && cached.mtimeMs === dirStat.mtimeMs) {
-      return cached.seconds;
-    }
-    const entries = await readdir(frameDir);
-    const seconds = entries
-      .filter((name) => FRAME_FILE_PATTERN.test(name))
-      .map((name) => Number.parseInt(name, 10))
-      .sort((left, right) => left - right);
-    this.cache.set(frameDir, { mtimeMs: dirStat.mtimeMs, seconds });
-    return seconds;
   }
 }

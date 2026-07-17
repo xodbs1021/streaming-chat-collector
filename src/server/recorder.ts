@@ -353,8 +353,13 @@ export class ChatRecorder {
       try {
         await stat(this.paths.metaFilePath(broadcastId, provider));
         return true;
-      } catch {
-        // 이 provider 세션 없음 — 다음 provider 확인.
+      } catch (error) {
+        // ENOENT만 "이 provider 세션 없음"으로 확정한다. 그 외(EMFILE/EIO 등 일시 오류)는
+        // 부재가 확인된 게 아니므로 방송 생존으로 보수 판정 — 살아 있는 다른 provider 세션이
+        // 남은 방송 폴더를 rm하는 오판(데이터 파괴 방향)을 막는다.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          return true;
+        }
       }
     }
     return false;

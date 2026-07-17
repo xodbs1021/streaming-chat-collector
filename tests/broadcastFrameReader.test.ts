@@ -87,6 +87,19 @@ describe("BroadcastFrameReader", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("readdir이 실패해도(레이스: stat 직후 폴더 삭제) throw 없이 []로 자기 치유한다", async () => {
+    const root = await makeTempRoot();
+    const broadcastId = createBroadcastId();
+    await makeFrameFixture(root, broadcastId, "chzzk", ["100.jpg"]);
+    const reader = new BroadcastFrameReader(new BroadcastPaths(root));
+
+    vi.mocked(readdir).mockRejectedValueOnce(Object.assign(new Error("ENOENT: no such directory"), { code: "ENOENT" }));
+    expect(await reader.listFrameSeconds(broadcastId, "chzzk", 0, Number.MAX_SAFE_INTEGER)).toEqual([]);
+    // 다음 조회는 실제 fs로 정상 복구된다(캐시 엔트리 제거 후 재구축).
+    expect(await reader.listFrameSeconds(broadcastId, "chzzk", 0, Number.MAX_SAFE_INTEGER)).toEqual([100]);
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("삭제 자기 치유: 조회 후 폴더가 사라지면 재조회는 []", async () => {
     const root = await makeTempRoot();
     const broadcastId = createBroadcastId();

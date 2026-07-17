@@ -1,4 +1,4 @@
-import type { ChatProvider } from "../shared/types";
+import type { ChatProvider, FrameIndexResponse } from "../shared/types";
 import type { FrameCaptureStatus } from "../shared/frameCaptureStatus";
 
 /** 프레임 API 주소의 공통 앞부분 — broadcastId를 주면 과거 방송 주소, 없으면 라이브 주소(현행). */
@@ -18,7 +18,8 @@ export async function fetchFrameSeconds(
   if (!response.ok) {
     return [];
   }
-  const json = (await response.json()) as { seconds?: unknown };
+  // 서버 계약은 FrameIndexResponse — 다만 경계면이므로 shape을 신뢰하지 않고 런타임 검증(Array/number 필터)은 유지한다.
+  const json = (await response.json()) as Partial<FrameIndexResponse>;
   const seconds = Array.isArray(json.seconds) ? json.seconds.filter((value): value is number => typeof value === "number") : [];
   return seconds.slice().sort((left, right) => left - right);
 }

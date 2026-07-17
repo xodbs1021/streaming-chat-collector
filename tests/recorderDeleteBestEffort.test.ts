@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -42,6 +42,35 @@ describe("chat recorder — 빈 방송 폴더 정리는 베스트 에포트", ()
     await expect(actualFs.stat(path.join(broadcastDir, "chat", "chzzk"))).rejects.toThrow();
     await expect(actualFs.stat(broadcastDir)).resolves.toBeTruthy(); // husk는 남는다 — 무해한 잔여물
     expect(consoleError).toHaveBeenCalled(); // 삼키되 로그는 남긴다
+
+    await actualFs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("meta 확인 stat이 ENOENT 아닌 오류(EIO)를 내면 방송 폴더를 지우지 않는다(보수 판정)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "chat-recorder-besteffort-"));
+    const recorder = new ChatRecorder(dir);
+    const broadcast = await recorder.startRecording([chzzkRef()]);
+    await recorder.recordMessage(makeMessage());
+    await recorder.flushWrites();
+    await recorder.stopRecording();
+    const broadcastDir = path.join(dir, broadcast!.broadcastId);
+
+    // provider meta 경로의 stat만 일시 오류(EIO) — "없음"이 확인된 게 아니므로 husk 정리가 나서면 안 된다.
+    const providerMetaPaths = new Set([
+      path.join(broadcastDir, "chat", "chzzk", "meta.json"),
+      path.join(broadcastDir, "chat", "soop", "meta.json")
+    ]);
+    vi.mocked(stat).mockImplementation(async (target) => {
+      if (providerMetaPaths.has(String(target))) {
+        throw Object.assign(new Error("EIO: i/o error, stat"), { code: "EIO" });
+      }
+      return actualFs.stat(target);
+    });
+
+    await expect(recorder.deleteSession(`${broadcast!.broadcastId}__chzzk`)).resolves.toBe("deleted");
+    await expect(actualFs.stat(path.join(broadcastDir, "chat", "chzzk"))).rejects.toThrow(); // chat은 지워졌다
+    await expect(actualFs.stat(broadcastDir)).resolves.toBeTruthy(); // 방송 폴더는 보존(오판 방지)
+    expect(vi.mocked(rm).mock.calls.some(([target]) => String(target) === broadcastDir)).toBe(false);
 
     await actualFs.rm(dir, { recursive: true, force: true });
   });
