@@ -17,6 +17,7 @@ import { getFfmpegReadiness, probeFfmpeg } from "./ffmpegRuntime";
 import { CAPTURE_READY_TIMEOUT_MS, planFromReadiness } from "../shared/captureReadiness";
 import { ChatRecorder } from "./recorder";
 import { BroadcastPaths } from "./broadcast/broadcastPaths";
+import { BroadcastFrameReader } from "./broadcast/broadcastFrameReader";
 import { RecordingGrace } from "./broadcast/recordingGrace";
 import { AppState, type AppSocketServer } from "./state";
 import { persistChzzkToken, readStoredChzzkToken } from "./chzzkTokenStore";
@@ -43,6 +44,8 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(app.server, {
 const recorder = new ChatRecorder(path.resolve(process.cwd(), config.chatDataDir));
 // 프레임 캡처 대상 폴더 조립용 — recorder와 같은 저장 루트를 공유한다(경로 규칙은 BroadcastPaths 단일 진실원).
 const broadcastPaths = new BroadcastPaths(path.resolve(process.cwd(), config.chatDataDir));
+// 종료된 방송의 프레임 읽기 전용 reader — 라이브 캡처 매니저와 무관하게 /api/broadcasts 라우트에 주입한다.
+const frameReader = new BroadcastFrameReader(broadcastPaths);
 // 콜백은 "미설치로 확정되지 않았나"를 반환한다 — unknown(프로브 전)/ready는 true, 확정 미설치만 false.
 const isFfmpegNotMissing = () => getFfmpegReadiness() !== "missing";
 // 화질은 설정의 단일 진실원에서 조회한다 — state는 아래에서 초기화되지만 이 화살표는
@@ -157,7 +160,7 @@ app.post<{ Body: Partial<OverlaySettings> }>("/api/settings", async (request) =>
 registerAnalyticsRoutes(app, { recorder, liveAnalytics, io });
 registerProviderRoutes(app, { state, providerLogs, connectProvider, disconnectProvider });
 registerAuthRoutes(app, { state, getChzzkToken, setChzzkToken });
-registerFrameRoutes(app, { frameManagers: frameCaptureManagers });
+registerFrameRoutes(app, { frameManagers: frameCaptureManagers, frameReader });
 
 // SPA 폴백 — 정적 파일과 겹치지 않는 경로(관리 화면 등 클라이언트 라우트)만 여기로 들어온다.
 // 매번 서버 재시작 없이 최신 빌드 파일을 반영하려면 정적 플러그인이 자체 와일드카드로
