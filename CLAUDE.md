@@ -24,3 +24,4 @@
 | 2026-07-12 | completion-auditor에 "운영 반영 여부" 감사 기준 추가 | agents/completion-auditor.md | 코드 완료(머지·테스트)만 검증하고 운영 서버(dist 빌드본) 반영을 안 봐서, 사용자가 옛 빌드 화면을 보며 "그대로"라고 항의한 실사고 재발 방지 |
 | 2026-07-13 | change-explainer도 Stop 훅으로 강제(`.needs-explain` 플래그 + `stop:explain` 게이트, 순서 타입체크→설명→감사) | .claude/hooks/(_common·mark-needs-audit·verify-before-stop), CLAUDE.md | Phase 5(변경 설명)가 산문으로만 존재해 오케스트레이터가 임의로 건너뛴 실사고 발생 → completion-auditor와 동일한 플래그 게이트로 강제 |
 | 2026-07-16 | 하네스 템플릿 마이그레이션: chat-harness+도메인 스킬 11개 → harness-orchestrator 1개, 에이전트 10→12(design-architect·security-reviewer 추가, 전원 제네릭화), 도메인은 프로필 슬롯으로, 훅 4종 신판(harness.env 기반 타입체크, HARNESS_HOOKS 탈출구) | .claude/ 전체, CLAUDE.md | 도메인-무관 재사용 템플릿(github.com/xodbs1021/kty-claude-harness-template)으로 일원화 — 정본 repo에서 sync.sh로 개선 전파 가능 |
+| 2026-07-17 | find-skills 연동(sync) — 진화 신호 채택 시 자체 제작 전에 스킬 생태계 검색(`npx skills find`) 선행, 있으면 전역 설치 제안 | skills/harness-orchestrator | 만들기 전에 찾는다(재사용 우선) — 템플릿 faa8178 sync |
