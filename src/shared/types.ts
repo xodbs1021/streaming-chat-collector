@@ -96,6 +96,11 @@ export interface RecordingStatus {
   lastRecordAt?: number;
 }
 
+/** 프레임 인덱스 응답 — 라이브(/api/frames)·과거(/api/broadcasts) index 라우트와 클라 fetchFrameSeconds가 공유. */
+export interface FrameIndexResponse {
+  seconds: number[];
+}
+
 export interface AnalyticsRankItem {
   label: string;
   count: number;

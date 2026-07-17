@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createBroadcastId } from "../src/server/broadcast/broadcastId";
+import { createBroadcastId, isValidBroadcastId } from "../src/server/broadcast/broadcastId";
 import { composeSessionKey, parseSessionKey } from "../src/server/broadcast/sessionKey";
 import { BroadcastPaths } from "../src/server/broadcast/broadcastPaths";
 import { RecordingGrace } from "../src/server/broadcast/recordingGrace";
@@ -13,6 +13,20 @@ describe("createBroadcastId", () => {
   it("같은 초라도 서로 다른 id를 만든다(6hex 충돌 방지)", () => {
     const now = new Date(2026, 6, 14, 15, 30, 12);
     expect(createBroadcastId(now)).not.toBe(createBroadcastId(now));
+  });
+});
+
+describe("isValidBroadcastId", () => {
+  it("createBroadcastId 출력을 통과시킨다", () => {
+    expect(isValidBroadcastId(createBroadcastId())).toBe(true);
+  });
+
+  it("형식 이탈을 거부한다", () => {
+    expect(isValidBroadcastId("")).toBe(false);
+    expect(isValidBroadcastId("20260714-153012")).toBe(false); // hex 없음
+    expect(isValidBroadcastId("20260714-153012-A1B2C3")).toBe(false); // 대문자 hex
+    expect(isValidBroadcastId("../../etc")).toBe(false);
+    expect(isValidBroadcastId("20260714-153012-a1b2c3__chzzk")).toBe(false); // 합성 키
   });
 });
 
