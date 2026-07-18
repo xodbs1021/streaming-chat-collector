@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -258,8 +258,95 @@ describe("chat recorder — 방송 라이프사이클", () => {
   });
 });
 
+describe("chat recorder — 세션 삭제(프레임 연동)", () => {
+  it("삭제가 chat과 frame을 함께 지운다", async () => {
+    const dir = await makeTempDir();
+    const recorder = new ChatRecorder(dir);
+    const broadcast = await recorder.startRecording([chzzkRef()]);
+    await recorder.recordMessage(makeMessage());
+    await recorder.flushWrites();
+    await recorder.stopRecording();
+    const frameDir = await makeFrameFixture(dir, broadcast!.broadcastId, "chzzk");
+
+    expect(await recorder.deleteSession(`${broadcast!.broadcastId}__chzzk`)).toBe("deleted");
+    await expect(stat(frameDir)).rejects.toThrow();
+    await expect(stat(path.join(dir, broadcast!.broadcastId, "chat", "chzzk"))).rejects.toThrow();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("다른 provider가 남아 있으면 방송 폴더를 유지한다", async () => {
+    const dir = await makeTempDir();
+    const recorder = new ChatRecorder(dir);
+    const broadcast = await recorder.startRecording([chzzkRef(), soopRef()]);
+    await recorder.recordMessage(makeMessage({ messageId: "chzzk-1" }));
+    await recorder.recordMessage(
+      makeMessage({ provider: "soop", sourceMode: "unofficial", channelId: "soop-bj", messageId: "soop-1" })
+    );
+    await recorder.flushWrites();
+    await recorder.stopRecording();
+    await makeFrameFixture(dir, broadcast!.broadcastId, "chzzk");
+
+    expect(await recorder.deleteSession(`${broadcast!.broadcastId}__chzzk`)).toBe("deleted");
+    await expect(stat(path.join(dir, broadcast!.broadcastId, "broadcast.meta.json"))).resolves.toBeTruthy();
+    await expect(stat(path.join(dir, broadcast!.broadcastId, "chat", "soop"))).resolves.toBeTruthy();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("마지막 provider 삭제 시 방송 폴더 전체를 제거한다", async () => {
+    const dir = await makeTempDir();
+    const recorder = new ChatRecorder(dir);
+    const broadcast = await recorder.startRecording([chzzkRef(), soopRef()]);
+    await recorder.recordMessage(makeMessage({ messageId: "chzzk-1" }));
+    await recorder.recordMessage(
+      makeMessage({ provider: "soop", sourceMode: "unofficial", channelId: "soop-bj", messageId: "soop-1" })
+    );
+    await recorder.flushWrites();
+    await recorder.stopRecording();
+
+    expect(await recorder.deleteSession(`${broadcast!.broadcastId}__chzzk`)).toBe("deleted");
+    expect(await recorder.deleteSession(`${broadcast!.broadcastId}__soop`)).toBe("deleted");
+    await expect(stat(path.join(dir, broadcast!.broadcastId))).rejects.toThrow();
+    expect(await recorder.listSessions()).toEqual([]);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("frame 폴더가 없어도 멱등하게 삭제된다", async () => {
+    const dir = await makeTempDir();
+    const recorder = new ChatRecorder(dir);
+    const broadcast = await recorder.startRecording([chzzkRef()]);
+    await recorder.recordMessage(makeMessage());
+    await recorder.flushWrites();
+    await recorder.stopRecording();
+
+    expect(await recorder.deleteSession(`${broadcast!.broadcastId}__chzzk`)).toBe("deleted");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("녹화 중 세션은 active, 없는 세션은 missing을 반환한다", async () => {
+    const dir = await makeTempDir();
+    const recorder = new ChatRecorder(dir);
+    const broadcast = await recorder.startRecording([chzzkRef()]);
+    await recorder.recordMessage(makeMessage());
+
+    expect(await recorder.deleteSession(`${broadcast!.broadcastId}__chzzk`)).toBe("active");
+    await expect(stat(path.join(dir, broadcast!.broadcastId, "chat", "chzzk"))).resolves.toBeTruthy();
+    expect(await recorder.deleteSession("20990101-000000-abcdef__chzzk")).toBe("missing");
+    expect(await recorder.deleteSession("잘못된-형식")).toBe("missing");
+    await recorder.stopRecording();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
 async function makeTempDir() {
   return mkdtemp(path.join(tmpdir(), "chat-recorder-"));
+}
+
+/** `<dir>/<broadcastId>/frame/<provider>/100.jpg` 더미 프레임을 만든다(캡처 산출물 흉내). */
+async function makeFrameFixture(dir: string, broadcastId: string, provider: "chzzk" | "soop") {
+  const frameDir = path.join(dir, broadcastId, "frame", provider);
+  await mkdir(frameDir, { recursive: true });
+  await writeFile(path.join(frameDir, "100.jpg"), "frame:100");
+  return frameDir;
 }
 
 function chzzkRef(): BroadcastProviderRef {

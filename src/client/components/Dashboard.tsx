@@ -150,43 +150,6 @@ export function DashboardRoute() {
   }, []);
 
   useEffect(() => {
-    // 5초마다 실제로 캡처된 프레임 초 목록을 가져온다 — 화면(호버/재생 패널)은 이 목록에
-    // 있는 초만 보여줘서, ffmpeg 재연결로 생긴 캡처 공백에서 이미지가 깜빡이지 않게 한다.
-    let cancelled = false;
-
-    async function refreshFrameIndex() {
-      // 캡처 상태 뱃지는 세션 윈도우가 없어도 항상 노출해야 하므로, 윈도우 유무와 무관하게 먼저 조회한다.
-      // Promise.allSettled로 두 provider·프레임 인덱스와 상호 실패를 격리한다.
-      const [chzzkStatus, soopStatus] = await Promise.allSettled([fetchFrameCaptureStatus("chzzk"), fetchFrameCaptureStatus("soop")]);
-      if (!cancelled) {
-        setFrameCaptureStatusByProvider({
-          chzzk: chzzkStatus.status === "fulfilled" ? chzzkStatus.value : undefined,
-          soop: soopStatus.status === "fulfilled" ? soopStatus.value : undefined
-        });
-      }
-
-      const windows = summaryWindowsRef.current;
-      if (windows.length === 0) {
-        return;
-      }
-      const fromSec = windows[0].windowStart / 1000;
-      const toSec = windows[windows.length - 1].windowEnd / 1000;
-      const [chzzk, soop] = await Promise.all([fetchFrameSeconds("chzzk", fromSec, toSec), fetchFrameSeconds("soop", fromSec, toSec)]);
-      if (!cancelled) {
-        setFrameSecondsByProvider({ chzzk, soop });
-        setFrameIndexLoaded(true);
-      }
-    }
-
-    void refreshFrameIndex();
-    const intervalId = window.setInterval(() => void refreshFrameIndex(), FRAME_INDEX_REFRESH_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, []);
-
-  useEffect(() => {
     windowSecRef.current = windowSec;
   }, [windowSec]);
 
@@ -395,6 +358,53 @@ export function DashboardRoute() {
       ? [recordingStatus.activeSession]
       : [];
   const selectedSession = selectedSessionId === "live" ? activeSessions[0] : sessions.find((session) => session.sessionId === selectedSessionId);
+  // 종료된 과거 세션을 보고 있을 때만 방송 id 주소로 프레임을 읽는다 — 라이브·진행 중 세션은
+  // 같은 방송을 쓰고 있는 캡처 매니저의 인메모리 인덱스(라이브 주소)가 가장 신선하다.
+  const frameBroadcastId = selectedSessionId !== "live" && !isSelectedSessionActive ? selectedSession?.broadcastId : undefined;
+
+  useEffect(() => {
+    // 5초마다 실제로 캡처된 프레임 초 목록을 가져온다 — 화면(호버/재생 패널)은 이 목록에
+    // 있는 초만 보여줘서, ffmpeg 재연결로 생긴 캡처 공백에서 이미지가 깜빡이지 않게 한다.
+    // 선택 소스(라이브 ↔ 과거 방송)가 바뀌면 이전 선택의 인덱스가 잔존하지 않게 초기화하고 다시 받는다.
+    setFrameSecondsByProvider({});
+    setFrameIndexLoaded(false);
+    let cancelled = false;
+
+    async function refreshFrameIndex() {
+      // 캡처 상태 뱃지는 세션 윈도우가 없어도 항상 노출해야 하므로, 윈도우 유무와 무관하게 먼저 조회한다.
+      // Promise.allSettled로 두 provider·프레임 인덱스와 상호 실패를 격리한다. (뱃지 폴링은 라이브 전용 유지)
+      const [chzzkStatus, soopStatus] = await Promise.allSettled([fetchFrameCaptureStatus("chzzk"), fetchFrameCaptureStatus("soop")]);
+      if (!cancelled) {
+        setFrameCaptureStatusByProvider({
+          chzzk: chzzkStatus.status === "fulfilled" ? chzzkStatus.value : undefined,
+          soop: soopStatus.status === "fulfilled" ? soopStatus.value : undefined
+        });
+      }
+
+      const windows = summaryWindowsRef.current;
+      if (windows.length === 0) {
+        return;
+      }
+      const fromSec = windows[0].windowStart / 1000;
+      const toSec = windows[windows.length - 1].windowEnd / 1000;
+      const [chzzk, soop] = await Promise.all([
+        fetchFrameSeconds("chzzk", fromSec, toSec, frameBroadcastId),
+        fetchFrameSeconds("soop", fromSec, toSec, frameBroadcastId)
+      ]);
+      if (!cancelled) {
+        setFrameSecondsByProvider({ chzzk, soop });
+        setFrameIndexLoaded(true);
+      }
+    }
+
+    void refreshFrameIndex();
+    const intervalId = window.setInterval(() => void refreshFrameIndex(), FRAME_INDEX_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [frameBroadcastId]);
+
   const visibleSessions = filterSessions(sessions, sessionProviderFilter, sessionDateFilter);
   // idle 상태(미연결/비활성)는 상단 뱃지에서 숨긴다 — 문제가 있는 provider만 나란히 노출한다.
   const captureBadges = (["chzzk", "soop"] as const)
@@ -723,6 +733,7 @@ export function DashboardRoute() {
             </div>
             <Timeline
               focusRange={focusRange}
+              frameBroadcastId={frameBroadcastId}
               frameIndexLoaded={frameIndexLoaded}
               frameSecondsByProvider={frameSecondsByProvider}
               markers={markers}
@@ -775,6 +786,7 @@ export function DashboardRoute() {
 
           {selectedRange && (
             <FramePlayerPanel
+              frameBroadcastId={frameBroadcastId}
               frameCaptureStatusByProvider={frameCaptureStatusByProvider}
               frameIndexLoaded={frameIndexLoaded}
               frameSecondsByProvider={frameSecondsByProvider}

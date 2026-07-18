@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { ChatProvider } from "../../../shared/types";
+import { frameImageUrl } from "../../frameIndexClient";
 
 /**
  * 해당 시각의 방송 프레임. provider에 캡처가 없으면(404) fallbackProvider로 한 번 더 시도하고,
@@ -14,14 +15,18 @@ export function FramePreview({
   second,
   provider,
   fallbackProvider,
+  broadcastId,
   large
 }: {
   second: number;
   provider: ChatProvider;
   fallbackProvider?: ChatProvider;
+  /** 있으면 과거 방송 주소로 읽는다 — 없으면 라이브 주소(현행). */
+  broadcastId?: string;
   large?: boolean;
 }) {
-  const frameKey = `${provider}-${second}`;
+  // broadcastId를 키에 포함해 라이브 ↔ 과거 소스 전환 시 재시도 상태가 이월되지 않게 한다.
+  const frameKey = `${provider}-${second}-${broadcastId ?? "live"}`;
   const [state, setState] = useState<{ frameKey: string; attempt: "primary" | "fallback" | "failed" }>({
     frameKey,
     attempt: "primary"
@@ -40,7 +45,7 @@ export function FramePreview({
       onError={() =>
         setState({ frameKey, attempt: attempt === "primary" && fallbackProvider ? "fallback" : "failed" })
       }
-      src={`/api/frames/${activeProvider}/${second}.jpg`}
+      src={frameImageUrl(activeProvider, second, broadcastId)}
     />
   );
 }

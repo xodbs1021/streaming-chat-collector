@@ -308,6 +308,9 @@ export class ChatRecorder {
     }
   }
 
+  /** 세션 삭제 = 그 provider 세션의 저장물 전체(chat + frame) 삭제.
+   *  frame·chat 삭제 성공 시점에 계약상 삭제 완료("deleted").
+   *  마지막 provider가 지워지면 방송 폴더 정리는 베스트 에포트 — 실패해도 로그만 남기고 "deleted"를 반환한다. */
   async deleteSession(sessionId: string): Promise<"active" | "missing" | "deleted"> {
     const location = this.locate(sessionId);
     if (!location) {
@@ -321,10 +324,45 @@ export class ChatRecorder {
     if (!session) {
       return "missing";
     }
+    // frame 먼저, chat 나중 — chat/<provider>/meta.json이 세션 가시성 앵커라, frame rm이 실패하면
+    // 세션이 목록에 남아 재시도할 수 있다(반대 순서면 고아 프레임이 어떤 세션으로도 접근 불가로 잔존).
+    await rm(this.paths.frameDir(location.broadcastId, location.provider), { recursive: true, force: true });
     await rm(this.paths.chatDir(location.broadcastId, location.provider), { recursive: true, force: true });
     this.countCache.delete(session.sessionId);
     this.dirtyMeta.delete(session.sessionId);
+    await this.removeBroadcastDirIfEmpty(location.broadcastId);
     return "deleted";
+  }
+
+  /** 방송에 provider 세션(meta.json)이 하나도 안 남았으면 방송 폴더(husk)를 통째로 지운다.
+   *  실패는 전파하지 않고 로그만 — 여기서 던지면 재시도가 meta 부재로 "missing"이 되어 정리 코드에 재도달 못 한다. */
+  private async removeBroadcastDirIfEmpty(broadcastId: string): Promise<void> {
+    try {
+      if (await this.hasAnyProviderMeta(broadcastId)) {
+        return;
+      }
+      await rm(this.paths.broadcastDir(broadcastId), { recursive: true, force: true });
+    } catch (error) {
+      console.error("[recorder] 빈 방송 폴더 정리 실패:", error instanceof Error ? error.message : error);
+    }
+  }
+
+  /** 닫힌 provider 합집합 각각의 meta.json 존재를 확인한다 — 하나라도 있으면 방송이 아직 산다. */
+  private async hasAnyProviderMeta(broadcastId: string): Promise<boolean> {
+    for (const provider of ["chzzk", "soop"] as const) {
+      try {
+        await stat(this.paths.metaFilePath(broadcastId, provider));
+        return true;
+      } catch (error) {
+        // ENOENT만 "이 provider 세션 없음"으로 확정한다. 그 외(EMFILE/EIO 등 일시 오류)는
+        // 부재가 확인된 게 아니므로 방송 생존으로 보수 판정 — 살아 있는 다른 provider 세션이
+        // 남은 방송 폴더를 rm하는 오판(데이터 파괴 방향)을 막는다.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   async updateSessionMeta(sessionId: string, patch: { displayName?: string }) {

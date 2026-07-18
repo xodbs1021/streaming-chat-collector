@@ -12,3 +12,10 @@ export function createBroadcastId(now: Date = new Date()): string {
     `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   return `${stamp}-${randomBytes(3).toString("hex")}`;
 }
+
+export const BROADCAST_ID_PATTERN = /^\d{8}-\d{6}-[0-9a-f]{6}$/;
+
+/** createBroadcastId가 만드는 형식(YYYYMMDD-HHMMSS-6hex) 그대로인지 검증한다. */
+export function isValidBroadcastId(value: string): boolean {
+  return BROADCAST_ID_PATTERN.test(value);
+}
