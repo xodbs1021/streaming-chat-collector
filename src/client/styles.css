@@ -349,7 +349,7 @@ time {
   width: 100%;
   align-items: center;
   gap: 10px;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   min-height: 46px;
   margin-top: 8px;
   padding: 0 10px;
@@ -359,6 +359,24 @@ time {
   color: #dff6ea;
   cursor: pointer;
   text-align: left;
+}
+
+/* 다중 provider 방송 행 — provider를 배지로 전달(이름에선 접미사 생략). 색이 곧 플랫폼 식별. */
+.session-provider-badges {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.session-provider-badges em {
+  padding: 2px 7px;
+  border: 1px solid rgba(67, 244, 156, 0.32);
+  border-radius: 999px;
+  background: rgba(49, 232, 149, 0.1);
+  color: #84f8bd;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .session-row span {
@@ -418,10 +436,10 @@ time {
 }
 
 .status-strip {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
   min-height: 48px;
   padding: 0 14px;
   border: 1px solid rgba(226, 255, 240, 0.12);
@@ -439,9 +457,30 @@ time {
   gap: 8px;
 }
 
+/* 상태 메시지 칸이 남는 폭을 흡수해 이후 컨트롤(초기화/내보내기/녹화)을 우측으로 민다 */
 .status-strip div:first-child {
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recording-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* grace(유예) 상태 표식 — 앰버 계열로 "자동 종료 대기 중"을 색으로 전달 */
+.recording-grace-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid rgba(239, 184, 101, 0.4);
+  border-radius: 999px;
+  color: #efb865;
+  font-size: 12px;
+  font-weight: 700;
   white-space: nowrap;
 }
 
@@ -546,7 +585,18 @@ time {
   background: rgba(255, 255, 255, 0.045);
 }
 
-.window-tabs button {
+/* 과거 방송 provider 탭 — window-tabs의 버튼 외관을 재사용하되, 탭 수(=provider 수)만큼만 폭을 차지 */
+.broadcast-tabs {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid rgba(226, 255, 240, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.window-tabs button,
+.broadcast-tabs button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -561,7 +611,8 @@ time {
   font-weight: 850;
 }
 
-.window-tabs button.active {
+.window-tabs button.active,
+.broadcast-tabs button.active {
   background: rgba(64, 232, 147, 0.2);
   color: #f5fff8;
   box-shadow: inset 0 0 0 1px rgba(87, 255, 173, 0.38);
@@ -1688,6 +1739,18 @@ time {
   background: rgba(12, 154, 88, 0.1);
 }
 
+/* 다크 전용 밝은 녹/앰버 톤은 흰 배경에서 묻히므로, 같은 의미의 어두운 톤으로 오버라이드(capture-badge와 동일 전략) */
+:root[data-theme="light"] .session-provider-badges em {
+  border-color: rgba(12, 154, 88, 0.4);
+  background: rgba(12, 154, 88, 0.08);
+  color: #0b6b40;
+}
+
+:root[data-theme="light"] .recording-grace-pill {
+  border-color: rgba(138, 90, 0, 0.45);
+  color: #8a5a00;
+}
+
 :root[data-theme="light"] .session-filters select,
 :root[data-theme="light"] .session-filters input,
 :root[data-theme="light"] .session-meta-editor input,
@@ -1748,11 +1811,13 @@ time {
   color: #55705f;
 }
 
-:root[data-theme="light"] .window-tabs button {
+:root[data-theme="light"] .window-tabs button,
+:root[data-theme="light"] .broadcast-tabs button {
   color: #3c584a;
 }
 
-:root[data-theme="light"] .window-tabs button.active {
+:root[data-theme="light"] .window-tabs button.active,
+:root[data-theme="light"] .broadcast-tabs button.active {
   background: rgba(12, 154, 88, 0.14);
   color: #0b3d26;
   box-shadow: inset 0 0 0 1px rgba(12, 154, 88, 0.4);
@@ -1942,6 +2007,7 @@ time {
 
 :root[data-theme="light"] .metric-tile,
 :root[data-theme="light"] .window-tabs,
+:root[data-theme="light"] .broadcast-tabs,
 :root[data-theme="light"] .threshold-strip span,
 :root[data-theme="light"] .threshold-strip strong,
 :root[data-theme="light"] .mode-control button,

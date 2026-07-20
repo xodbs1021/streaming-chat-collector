@@ -1,6 +1,9 @@
 import { Clock } from "lucide-react";
 import type { RecordingSession } from "../../../shared/types";
-import { formatSessionName } from "./format";
+import type { BroadcastGroup } from "./broadcastGroups";
+import { defaultSessionOf } from "./broadcastGroups";
+import { PROVIDER_LABEL } from "./constants";
+import { formatBroadcastName } from "./format";
 import { SessionFilters, SessionMetaEditor } from "./SessionFilters";
 
 export function SessionSidebar({
@@ -15,7 +18,7 @@ export function SessionSidebar({
   displayNameDraft,
   onDisplayNameChange,
   onSaveDisplayName,
-  visibleSessions
+  visibleGroups
 }: {
   liveTotalMessages: number;
   selectedSessionId: string;
@@ -28,7 +31,7 @@ export function SessionSidebar({
   displayNameDraft: string;
   onDisplayNameChange(value: string): void;
   onSaveDisplayName(): void;
-  visibleSessions: RecordingSession[];
+  visibleGroups: BroadcastGroup[];
 }) {
   return (
     <aside className="panel session-panel">
@@ -44,17 +47,29 @@ export function SessionSidebar({
       {selectedSessionId !== "live" && selectedSession && (
         <SessionMetaEditor displayName={displayNameDraft} onDisplayNameChange={onDisplayNameChange} onSave={onSaveDisplayName} />
       )}
-      {visibleSessions.map((session) => (
-        <button
-          className={`session-row ${selectedSessionId === session.sessionId ? "active" : ""}`}
-          key={session.sessionId}
-          onClick={() => onSelectSession(session.sessionId)}
-        >
-          <span>{formatSessionName(session)}</span>
-          <strong>{session.messageCount}</strong>
-        </button>
-      ))}
-      {visibleSessions.length === 0 && <div className="empty-state compact-empty">조건에 맞는 세션이 없습니다.</div>}
+      {visibleGroups.map((group) => {
+        // 방송 1행 — 클릭 시 기본 provider 세션을 선택하고, 탭이 형제 provider로 전환한다.
+        const primary = defaultSessionOf(group);
+        const isActive = group.sessions.some((session) => session.sessionId === selectedSessionId);
+        return (
+          <button
+            className={`session-row ${isActive ? "active" : ""}`}
+            key={group.groupKey}
+            onClick={() => onSelectSession(primary.sessionId)}
+          >
+            <span>{formatBroadcastName(group)}</span>
+            {group.sessions.length >= 2 && (
+              <span className="session-provider-badges">
+                {group.sessions.map((session) => (
+                  <em key={session.provider}>{PROVIDER_LABEL[session.provider]}</em>
+                ))}
+              </span>
+            )}
+            <strong>{group.totalMessageCount}</strong>
+          </button>
+        );
+      })}
+      {visibleGroups.length === 0 && <div className="empty-state compact-empty">조건에 맞는 세션이 없습니다.</div>}
     </aside>
   );
 }
