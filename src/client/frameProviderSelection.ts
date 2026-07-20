@@ -1,7 +1,7 @@
 import { nearestFrameSecond } from "../shared/frameSeconds";
 import type { AnalyticsWindow, ChatProvider } from "../shared/types";
 
-const PROVIDER_ORDER: ChatProvider[] = ["chzzk", "soop"];
+export const PROVIDER_ORDER: ChatProvider[] = ["chzzk", "soop"];
 const FRAME_MATCH_TOLERANCE_SEC = 15;
 
 /** providerCounts 중 채팅량이 더 많은 플랫폼을 고른다. 동률이면 치지직 우선, 둘 다 0이면 undefined */

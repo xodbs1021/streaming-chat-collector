@@ -42,10 +42,14 @@ import {
   formatViewerBreakdown,
   markerColor
 } from "./dashboard/format";
+import { BroadcastTabs } from "./dashboard/BroadcastTabs";
+import { findGroupOf, groupSessionsByBroadcast } from "./dashboard/broadcastGroups";
 import { FramePlayerPanel } from "./dashboard/FramePlayerPanel";
 import { buildManualCandidate, getAnnotationRange } from "./dashboard/highlight";
 import { HighlightMemoPanel } from "./dashboard/HighlightMemoPanel";
 import { Metric, RankList, WindowComparisonPanel } from "./dashboard/panels";
+import { countConnectedProviders } from "./dashboard/providerConnection";
+import { RecordingControls } from "./dashboard/RecordingControls";
 import { SessionSidebar } from "./dashboard/SessionSidebar";
 import { SpikeToasts } from "./dashboard/SpikeToasts";
 import { Timeline } from "./dashboard/Timeline";
@@ -78,6 +82,7 @@ export function DashboardRoute() {
   const [keywordInput, setKeywordInput] = useState("");
   const [spikeToasts, setSpikeToasts] = useState<Array<{ id: number; message: string }>>([]);
   const [providerViewerCounts, setProviderViewerCounts] = useState<Partial<Record<"chzzk" | "soop", number>>>({});
+  const [connectedCount, setConnectedCount] = useState(0);
   const [markers, setMarkers] = useState<TimelineMarker[]>([]);
   const [markersSessionId, setMarkersSessionId] = useState<string | undefined>();
   const [canSaveMarkers, setCanSaveMarkers] = useState(false);
@@ -136,6 +141,7 @@ export function DashboardRoute() {
         chzzk: statuses.chzzk?.state === "connected" ? statuses.chzzk.viewerCount : undefined,
         soop: statuses.soop?.state === "connected" ? statuses.soop.viewerCount : undefined
       });
+      setConnectedCount(countConnectedProviders(statuses));
     };
 
     socket.on("recording:status", onRecordingStatus);
@@ -405,7 +411,13 @@ export function DashboardRoute() {
     };
   }, [frameBroadcastId]);
 
-  const visibleSessions = filterSessions(sessions, sessionProviderFilter, sessionDateFilter);
+  // recording:status 등으로 리렌더가 잦으므로 필터·그룹핑을 메모이즈 — 입력(세션·필터)이 바뀔 때만 재계산.
+  const visibleSessions = useMemo(
+    () => filterSessions(sessions, sessionProviderFilter, sessionDateFilter),
+    [sessions, sessionProviderFilter, sessionDateFilter]
+  );
+  const groups = useMemo(() => groupSessionsByBroadcast(visibleSessions), [visibleSessions]);
+  const selectedGroup = selectedSessionId !== "live" ? findGroupOf(groups, selectedSessionId) : undefined;
   // idle 상태(미연결/비활성)는 상단 뱃지에서 숨긴다 — 문제가 있는 provider만 나란히 노출한다.
   const captureBadges = (["chzzk", "soop"] as const)
     .map((provider) => ({ provider, status: frameCaptureStatusByProvider[provider] }))
@@ -463,6 +475,15 @@ export function DashboardRoute() {
 
   async function loadSessions() {
     setSessions(await fetchJson<RecordingSession[]>("/api/analytics/sessions"));
+  }
+
+  // 녹화는 낙관적 갱신 없이 emit만 — 상태는 서버 recording:status 방출이 단일 진실로 되돌린다.
+  function startRecording() {
+    socket.emit("recording:start");
+  }
+
+  function stopRecording() {
+    socket.emit("recording:stop");
   }
 
   async function resetLive() {
@@ -606,7 +627,7 @@ export function DashboardRoute() {
           providerFilter={sessionProviderFilter}
           selectedSession={selectedSession}
           selectedSessionId={selectedSessionId}
-          visibleSessions={visibleSessions}
+          visibleGroups={groups}
           onDateChange={setSessionDateFilter}
           onDisplayNameChange={setDisplayNameDraft}
           onProviderChange={setSessionProviderFilter}
@@ -660,7 +681,21 @@ export function DashboardRoute() {
                 </a>
               </div>
             )}
+            <RecordingControls
+              connectedCount={connectedCount}
+              recordingState={recordingStatus.recordingState ?? "idle"}
+              onStart={startRecording}
+              onStop={stopRecording}
+            />
           </div>
+
+          {selectedSessionId !== "live" && selectedGroup && selectedGroup.sessions.length >= 2 && (
+            <BroadcastTabs
+              selectedSessionId={selectedSessionId}
+              sessions={selectedGroup.sessions}
+              onSelectSession={setSelectedSessionId}
+            />
+          )}
 
           <div className="metric-grid">
             <Metric icon={<MessageSquareText size={19} />} label="메시지" value={summary.totalMessages.toLocaleString()} />

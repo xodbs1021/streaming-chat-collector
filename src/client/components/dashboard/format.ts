@@ -1,4 +1,5 @@
-import type { AnalyticsWindow, HighlightCandidate, RecordingSession, RecordingStatus } from "../../../shared/types";
+import type { AnalyticsWindow, HighlightCandidate, RecordingSession, RecordingState, RecordingStatus } from "../../../shared/types";
+import type { BroadcastGroup } from "./broadcastGroups";
 import { MARKER_COLORS } from "./constants";
 
 export function markerColor(label: string) {
@@ -66,6 +67,39 @@ export function formatSessionName(session: RecordingSession) {
   return `${formatDate(session.startedAt)} · ${session.provider.toUpperCase()} · ${session.channelId}`;
 }
 
+/** 사이드바 방송 행 이름 — 단일 세션은 현행 외관 보존, 다중 provider는 provider를 배지가 전달하므로 이름에서 생략(중복·표기 엇갈림 방지). */
+export function formatBroadcastName(group: BroadcastGroup) {
+  if (group.sessions.length === 1) {
+    return formatSessionName(group.sessions[0]);
+  }
+  return group.displayName ?? formatDate(group.startedAt);
+}
+
+const RECORDING_START_LABEL = "녹화 시작";
+const RECORDING_STOP_LABEL = "녹화 종료";
+const RECORDING_NO_SOURCE_TOOLTIP = "연결된 소스가 없어 녹화를 시작할 수 없습니다.";
+
+/** 녹화 버튼 3상태(idle/recording/grace)를 렌더 전 필드로 환산 — RecordingControls는 이 구조체를 그리기만 한다. */
+export interface RecordingButtonState {
+  label: string;
+  disabled: boolean;
+  tooltip?: string;
+  showGracePill: boolean;
+}
+
+export function formatRecordingLabel(state: RecordingState, connectedCount: number): RecordingButtonState {
+  if (state === "recording") {
+    return { label: RECORDING_STOP_LABEL, disabled: false, showGracePill: false };
+  }
+  if (state === "grace") {
+    return { label: RECORDING_STOP_LABEL, disabled: false, showGracePill: true };
+  }
+  if (connectedCount === 0) {
+    return { label: RECORDING_START_LABEL, disabled: true, tooltip: RECORDING_NO_SOURCE_TOOLTIP, showGracePill: false };
+  }
+  return { label: RECORDING_START_LABEL, disabled: false, showGracePill: false };
+}
+
 export function filterSessions(sessions: RecordingSession[], provider: "all" | "chzzk" | "soop", date: string) {
   return sessions.filter((session) => {
     if (provider !== "all" && session.provider !== provider) {
@@ -85,7 +119,9 @@ function formatDateInput(timestamp: number) {
 }
 
 function formatDate(timestamp: number) {
+  // 브라우저 로컬 TZ와 무관하게 항상 KST — 사이드바 방송/세션 이름의 날짜가 형제·프레임 시각과 어긋나지 않게.
   return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
