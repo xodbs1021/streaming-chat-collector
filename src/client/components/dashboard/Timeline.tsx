@@ -2,7 +2,7 @@ import { Eye, Percent } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import type { AnalyticsWindow, ChatProvider, HighlightThresholds, TimelineMarker } from "../../../shared/types";
-import { dominantProvider, otherProvider, resolveAvailableFrames } from "../../frameProviderSelection";
+import { DEFAULT_PROVIDER, otherProvider, resolveAvailableFrames, resolvePrimaryProvider } from "../../frameProviderSelection";
 import {
   BAR_GAP,
   BAR_WIDTH,
@@ -28,6 +28,7 @@ export function Timeline({
   markers,
   participationRate,
   selection,
+  sessionProvider,
   windows,
   windowSec,
   thresholds,
@@ -41,6 +42,8 @@ export function Timeline({
   markers: TimelineMarker[];
   participationRate?: number;
   selection?: TimelineSelection;
+  /** 세션 탭이면 그 세션의 provider — 채팅 없는 빈 구간의 프레임 폴백에 쓴다(라이브는 undefined). */
+  sessionProvider?: ChatProvider;
   windows: AnalyticsWindow[];
   windowSec: number;
   thresholds: HighlightThresholds;
@@ -99,12 +102,14 @@ export function Timeline({
     // windowStart로 키를 잡아서 같은 막대 안에서 마우스가 움직여도(hovered 객체 자체는
     // 매번 새로 생성됨) 재생이 처음부터 다시 시작되지 않고, 다른 막대로 옮겨갈 때만 리셋된다.
     // frameSecondsByProvider의 5초 폴링 자체는 이 effect를 재시작시키지 않도록 ref로 최신값만 읽는다.
+    // sessionProvider는 실제 dep으로 둔다 — 키보드로 세션 탭을 바꾸면 primary/frameCount를 다시 계산해야
+    // 스테일 frameCount로 재생이 어긋나지 않는다.
     setFrameIndex(0);
     if (!hovered) {
       return undefined;
     }
     const candidateSeconds = frameSecondsForWindow(hovered.window);
-    const primary = dominantProvider(hovered.window.providerCounts) ?? "chzzk";
+    const primary = resolvePrimaryProvider(hovered.window.providerCounts, sessionProvider);
     const { loaded, byProvider } = frameAvailabilityRef.current;
     const frameCount = loaded
       ? resolveAvailableFrames(candidateSeconds, byProvider, primary, otherProvider(primary)).seconds.length
@@ -117,7 +122,7 @@ export function Timeline({
     }, FRAME_PLAYBACK_INTERVAL_MS);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hovered?.window.windowStart]);
+  }, [hovered?.window.windowStart, sessionProvider]);
 
   useEffect(() => {
     const scroller = scrollerRef.current;
@@ -241,7 +246,7 @@ export function Timeline({
   const rendered = filled.slice(firstRenderIndex, lastRenderIndex);
 
   const hoveredCandidateSeconds = hovered ? frameSecondsForWindow(hovered.window) : [];
-  const hoveredPrimaryProvider = hovered ? (dominantProvider(hovered.window.providerCounts) ?? "chzzk") : "chzzk";
+  const hoveredPrimaryProvider = hovered ? resolvePrimaryProvider(hovered.window.providerCounts, sessionProvider) : (sessionProvider ?? DEFAULT_PROVIDER);
   const hoveredResolved = frameIndexLoaded
     ? resolveAvailableFrames(hoveredCandidateSeconds, frameSecondsByProvider, hoveredPrimaryProvider, otherProvider(hoveredPrimaryProvider))
     : { provider: hoveredPrimaryProvider, seconds: hoveredCandidateSeconds };
