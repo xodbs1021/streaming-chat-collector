@@ -15,6 +15,7 @@ import { FrameCaptureManager, fetchChzzkHlsUrl, fetchSoopHlsUrl } from "./frameC
 import { resolveFrameChannelInput } from "./frameChannel";
 import {
   captureSlotOwns,
+  resolveManagersToStopOnFinalize,
   runSingleFrameCapture,
   shouldCaptureLateJoin,
   shouldStopOrphanedManager,
@@ -361,8 +362,15 @@ async function stopRecording() {
 async function finalizeRecording(message: string) {
   const ended = await recorder.stopRecording();
   if (ended) {
-    // 녹화 종료 = 캡처 종료 (연결과 무관, start↔stop 대칭) [Q2=A]. 비참여 매니저는 이미 stopped라 멱등.
-    await Promise.all(Object.values(frameCaptureManagers).map((manager) => manager.stop()));
+    // 녹화 종료 = 캡처 종료 (연결과 무관, start↔stop 대칭) [Q2=A]. 단, 무조건 stop하면 안 된다 —
+    // recorder.stopRecording()이 큐 드레인 await 전에 활성 방송을 비우므로, 그 창에서 다음 방송이 같은
+    // 매니저를 선점(재기동)했을 수 있다. 종료된 방송이 아직 소유한 매니저만 stop하고 소유권을 해제한다.
+    await Promise.all(
+      resolveManagersToStopOnFinalize(captureManagerOwner, ended.broadcastId).map(async (provider) => {
+        await frameCaptureManagers[provider].stop();
+        captureManagerOwner[provider] = undefined;
+      })
+    );
     // 캡처 슬롯 리셋 — 이 방송이 소유한 슬롯일 때만. stop await 사이 다음 방송이 세팅한 슬롯을
     // 지워 late-join 이중 캡처를 열지 않게 한다(방송 스코프 소유권 검사).
     if (captureSlotOwns(captureSlot, ended.broadcastId)) {

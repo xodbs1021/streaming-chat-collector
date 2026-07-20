@@ -62,6 +62,20 @@ export function shouldStopOrphanedManager(
   return managerOwner === myBroadcastId;
 }
 
+/**
+ * finalizeRecording에서 stop할 캡처 매니저 목록 — 종료된 방송이 아직 소유한 provider만.
+ * recorder.stopRecording()이 큐 드레인 await 전에 활성 방송을 비우므로, 그 창에서 다음 방송이 같은 매니저를
+ * 선점(재기동)했을 수 있다. 소유가 넘어간 매니저는 제외해, 이전 방송 finalize가 다음 방송 캡처를 stop하지 않게 한다.
+ */
+export function resolveManagersToStopOnFinalize(
+  owners: Partial<Record<ChatProvider, string | undefined>>,
+  endedBroadcastId: string
+): ChatProvider[] {
+  return (["chzzk", "soop"] as const).filter((provider) =>
+    shouldStopOrphanedManager(owners[provider], endedBroadcastId)
+  );
+}
+
 /** runSingleFrameCapture가 index.ts 런타임에 의존하는 부작용 계약(캡처 기동·중지·슬롯 세팅·소유권·SOOP 조회) */
 export interface SingleFrameCaptureDeps {
   /** 이 체인이 소유한 방송 id — 슬롯을 이 방송 스코프로 minting한다. */

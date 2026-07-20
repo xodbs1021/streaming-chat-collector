@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   captureSlotOwns,
   pickInitialCaptureProvider,
+  resolveManagersToStopOnFinalize,
   runSingleFrameCapture,
   shouldCaptureLateJoin,
   shouldFallbackToSoop,
@@ -260,5 +261,21 @@ describe("shouldStopOrphanedManager", () => {
 
   it("does not stop when no broadcast owns the manager", () => {
     expect(shouldStopOrphanedManager(undefined, "bc-A")).toBe(false);
+  });
+});
+
+describe("resolveManagersToStopOnFinalize", () => {
+  it("stops every manager the ended broadcast still owns", () => {
+    expect(resolveManagersToStopOnFinalize({ chzzk: "bc-A", soop: "bc-A" }, "bc-A")).toEqual(["chzzk", "soop"]);
+  });
+
+  // 선재 경합 회귀: finalize(A) 드레인 창에서 B가 chzzk 매니저를 선점(재기동)하면, A의 finalize는
+  // chzzk를 stop하면 안 된다(B의 새 캡처를 죽임). A가 아직 소유한 soop만 stop한다.
+  it("spares a manager a newer broadcast has already re-armed (finalize(A) must not stop B's capture)", () => {
+    expect(resolveManagersToStopOnFinalize({ chzzk: "bc-B", soop: "bc-A" }, "bc-A")).toEqual(["soop"]);
+  });
+
+  it("stops nothing when no manager is owned by the ended broadcast", () => {
+    expect(resolveManagersToStopOnFinalize({ chzzk: undefined, soop: "bc-B" }, "bc-A")).toEqual([]);
   });
 });
