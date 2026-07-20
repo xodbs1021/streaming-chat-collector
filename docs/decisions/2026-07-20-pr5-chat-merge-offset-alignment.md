@@ -98,8 +98,14 @@ anchorTime = soopTime + offsetMs
 - SOOP 세션 export의 relative 시각(`analytics.ts:322`, `timestamp − startedAt`)은 재작성 후 offset만큼 이동한다(음수는 기존 가드가 드랍). 기존 export shape은 무변경 — "SOOP export 시각은 anchor 축"이 이 PR의 계약
 - 병합 탭은 이번 PR 읽기 전용(마커는 치지직 세션 것 표시, 메모·마커 쓰기·window-compare는 provider 저장소에 묶여 범위 밖)
 
+### 알려진 한계 (4중 검수에서 수용·기각 — 의도적 미수정)
+- **희박 버스트가 600초 구간 경계에 걸치면 그 증거를 버릴 수 있다.** 600초 구간에선 드물고 carry 안전망(직전 신뢰값 이어쓰기)이 받쳐 무해 판정. 정밀 경계 처리는 YAGNI.
+- **저널/fsync 트랜잭션은 도입하지 않는다.** 로컬 단일 사용자 도구에 과설계 — rewrite→marker 크래시 창은 위 Negative대로 수용하고, 대신 "마커는 재작성 이후에 쓰인다 + 재실행 이중 시프트 없음"을 회귀 테스트로 고정(재실행 시 이미 정렬된 파일 재추정 ≈0).
+- **finalize 직후 라이브 뷰 자동 갱신은 하지 않는다.** 방송 종료 직후의 전이 상태라 수용(다음 조회/재선택에서 정렬본이 로드됨).
+- **활성 방송 병합 탭 fetch-skip은 컨테이너(Dashboard) 렌더 테스트로는 고정하지 않았다.** 이 저장소에 Dashboard 렌더 테스트 하네스가 없고(소켓·fetch 모킹 비용·플레이키), 동작은 `mergedOffsetBadge(활성→"방송 진행 중")` 단위 테스트 + 브라우저 실측으로 확인한다.
+
 ## 구현
 
-`shared/offset.ts`·`shared/types.ts`(offset 타입 4 + `offset:live`) · `server/offset/`(offsetEstimator·finalizeAlignment·liveOffsetTracker) · `server/routes/broadcasts.ts`(병합 API) · `server/index.ts`(트래커 배선·60초 타이머·finalize·킬스위치) · 클라(`viewSelection`·`BroadcastTabs` 합쳐 보기 탭·`OffsetBadge`·`Timeline`/`FramePlayerPanel` `framePrimaryProvider`). 커밋 8개(TDD). typecheck·test(50 신규 포함)·build 그린. 후속 PR6: 프레임 수집 단일화(치지직만, 폴백 SOOP).
+`shared/offset.ts`·`shared/types.ts`(offset 타입 4 + `offset:live`) · `server/offset/`(offsetEstimator·finalizeAlignment·liveOffsetTracker·offsetMarker) · `server/routes/broadcasts.ts`(병합 API) · `server/index.ts`(트래커 배선·60초 타이머·finalize·킬스위치) · 클라(`viewSelection`·`BroadcastTabs` 합쳐 보기 탭·`OffsetBadge`·`Timeline`/`FramePlayerPanel` `framePrimaryProvider`). 초기 8커밋(TDD) + 4중 검수(cc·cx·tq·보안) 후 3 fix 커밋(스프레드 오버플로·구간 축 고정점·라이브 applied 축·recorder 레이스). typecheck·test 그린. 후속 PR6: 프레임 수집 단일화(치지직만, 폴백 SOOP).
 
 **머지 ≠ 운영 반영**: `pnpm build` + 서버 재시작 필요(dist 빌드본 서빙).
