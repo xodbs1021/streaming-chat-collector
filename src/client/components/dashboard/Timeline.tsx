@@ -10,7 +10,6 @@ import {
   CHART_HEIGHT,
   FRAME_PLAYBACK_INTERVAL_MS,
   MARKER_END_LABEL,
-  MAX_FILLED_SLOTS,
   RENDER_BUFFER_SLOTS,
   SLOT_WIDTH,
   TIME_LABEL_SLOT_INTERVAL,
@@ -18,6 +17,7 @@ import {
 } from "./constants";
 import { formatFrameTimestamp, formatPercent, formatTime, formatWindowRange, frameSecondsForWindow, markerColor } from "./format";
 import { formatWindowLevel, getWindowVisualLevel } from "./highlight";
+import { fillTimelineWindows, msUntilNextWindowBoundary } from "./timelineWindows";
 import { FramePreview } from "./FramePreview";
 
 export function Timeline({
@@ -32,6 +32,7 @@ export function Timeline({
   framePrimaryProvider,
   windows,
   windowSec,
+  padToNow,
   thresholds,
   onSelectionChange
 }: {
@@ -49,6 +50,8 @@ export function Timeline({
   framePrimaryProvider?: ChatProvider;
   windows: AnalyticsWindow[];
   windowSec: number;
+  /** 라이브 뷰 신호 — true면 채팅이 끊겨도 타임라인을 현재 시각 버킷까지 빈 슬롯으로 연장한다. */
+  padToNow?: boolean;
   thresholds: HighlightThresholds;
   onSelectionChange(selection: TimelineSelection): void;
 }) {
@@ -63,7 +66,11 @@ export function Timeline({
   const [dragStartIndex, setDragStartIndex] = useState<number | undefined>();
   const [dragEndIndex, setDragEndIndex] = useState<number | undefined>();
   const [showViewerLine, setShowViewerLine] = useState(true);
-  const filled = useMemo(() => fillTimelineWindows(windows, windowSec), [windows, windowSec]);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const filled = useMemo(
+    () => fillTimelineWindows(windows, windowSec, padToNow ? nowMs : undefined),
+    [windows, windowSec, padToNow, nowMs]
+  );
   const totalWidth = Math.max(1, filled.length * SLOT_WIDTH);
   const maxCount = useMemo(() => filled.reduce((best, window) => Math.max(best, window.messageCount), 1), [filled]);
   const viewerValues = useMemo(() => {
@@ -100,6 +107,30 @@ export function Timeline({
   useEffect(() => {
     setFollowLatest(true);
   }, [windowSec]);
+
+  useEffect(() => {
+    if (!padToNow) {
+      return undefined;
+    }
+    // 라이브에서 채팅이 0이면 analytics:live 푸시가 안 와 리렌더가 멎는다 — 그래서 이 버그(축이
+    // 마지막 채팅에서 얼어붙음)가 난다. 라이브일 때만 윈도우 주기로 nowMs를 진행시켜 축이 현재
+    // 시각까지 계속 자라게 하고, 뷰를 벗어나면 cleanup으로 타이머를 해제한다.
+    // 첫 틱은 다음 버킷 경계에 정렬한 뒤(setTimeout) 그때부터 윈도우 주기로 돈다(setInterval) —
+    // 마운트 시점 기준 주기면 버킷이 바뀌어도 최대 한 윈도우 늦게 반영되기 때문.
+    setNowMs(Date.now());
+    const windowMs = Math.max(1, Math.round(windowSec)) * 1000;
+    let intervalId: number | undefined;
+    const timeoutId = window.setTimeout(() => {
+      setNowMs(Date.now());
+      intervalId = window.setInterval(() => setNowMs(Date.now()), windowMs);
+    }, msUntilNextWindowBoundary(Date.now(), windowMs));
+    return () => {
+      window.clearTimeout(timeoutId);
+      if (intervalId !== undefined) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [padToNow, windowSec]);
 
   useEffect(() => {
     // windowStart로 키를 잡아서 같은 막대 안에서 마우스가 움직여도(hovered 객체 자체는
@@ -406,38 +437,4 @@ export function Timeline({
 
 function clampIndex(index: number, length: number) {
   return Math.min(Math.max(0, length - 1), Math.max(0, index));
-}
-
-function fillTimelineWindows(windows: AnalyticsWindow[], windowSec: number): AnalyticsWindow[] {
-  if (windows.length < 2) {
-    return windows;
-  }
-  const windowMs = Math.max(1, Math.round(windowSec)) * 1000;
-  const first = windows[0];
-  const last = windows[windows.length - 1];
-  const slotCount = Math.round((last.windowStart - first.windowStart) / windowMs) + 1;
-  if (!Number.isFinite(slotCount) || slotCount <= windows.length || slotCount > MAX_FILLED_SLOTS) {
-    return windows;
-  }
-  const byStart = new Map(windows.map((window) => [window.windowStart, window]));
-  return Array.from({ length: slotCount }, (_, index) => {
-    const windowStart = first.windowStart + index * windowMs;
-    return byStart.get(windowStart) ?? emptyTimelineWindow(windowStart, windowMs);
-  });
-}
-
-function emptyTimelineWindow(windowStart: number, windowMs: number): AnalyticsWindow {
-  return {
-    windowStart,
-    windowEnd: windowStart + windowMs,
-    messageCount: 0,
-    uniqueChatters: 0,
-    avgLength: 0,
-    maxLength: 0,
-    providerCounts: {},
-    roleCounts: {},
-    topChatters: [],
-    topTerms: [],
-    topEmotes: []
-  };
 }
