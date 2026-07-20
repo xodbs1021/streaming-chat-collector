@@ -2,7 +2,9 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import type { BroadcastOffset, ChatRecord, OffsetEstimatorParams } from "../../shared/types";
 import { toAnchorTimestamp } from "../../shared/offset";
 import { BroadcastPaths } from "../broadcast/broadcastPaths";
+import { isValidBroadcastId } from "../broadcast/broadcastId";
 import { DEFAULT_ESTIMATOR_PARAMS, estimateOffsetSegments } from "./offsetEstimator";
+import { readOffsetMarker } from "./offsetMarker";
 
 const OFFSET_VERSION = 1;
 
@@ -25,6 +27,11 @@ export async function finalizeBroadcastAlignment(
   deps: FinalizeAlignmentDeps
 ): Promise<BroadcastOffset | undefined> {
   const { paths, params = DEFAULT_ESTIMATOR_PARAMS, now = Date.now } = deps;
+
+  // 방어 계약 — 경로 조립 전에 형식을 검증한다(호출부는 broadcastId를 신뢰하지만 이중 방어).
+  if (!isValidBroadcastId(broadcastId)) {
+    return undefined;
+  }
 
   // 멱등 가드 — 마커가 있으면 이미 정렬된 방송이므로 재작성하지 않고 기존 offset을 돌려준다.
   const existing = await readOffsetMarker(paths.offsetFilePath(broadcastId));
@@ -64,15 +71,6 @@ export async function finalizeBroadcastAlignment(
   // 마커는 재작성 성공 뒤에 쓴다 — 마커 존재가 "정렬 완료"의 단일 신호(멱등 가드).
   await atomicWrite(paths.offsetFilePath(broadcastId), `${JSON.stringify(offset, null, 2)}\n`);
   return offset;
-}
-
-async function readOffsetMarker(filePath: string): Promise<BroadcastOffset | undefined> {
-  try {
-    const parsed = JSON.parse(await readFile(filePath, "utf8")) as BroadcastOffset;
-    return parsed?.anchor === "chzzk" && Array.isArray(parsed.segments) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 async function readChatRecords(filePath: string): Promise<ChatRecord[]> {

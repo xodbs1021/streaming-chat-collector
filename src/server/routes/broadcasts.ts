@@ -1,11 +1,11 @@
 import type { FastifyInstance } from "fastify";
-import { readFile } from "node:fs/promises";
-import type { BroadcastOffset, ChatRecord, ViewerCountSample } from "../../shared/types";
+import type { ChatRecord, ViewerCountSample } from "../../shared/types";
 import { summarizeChatRecords, summarizeHighlightCandidates } from "../analytics";
 import { ChatRecorder } from "../recorder";
 import { BroadcastPaths } from "../broadcast/broadcastPaths";
 import { isValidBroadcastId } from "../broadcast/broadcastId";
 import { composeSessionKey } from "../broadcast/sessionKey";
+import { readOffsetMarker } from "../offset/offsetMarker";
 import { readKeywords, readWindowSec } from "./params";
 
 interface BroadcastRouteDeps {
@@ -81,14 +81,4 @@ export function registerBroadcastRoutes(app: FastifyInstance, deps: BroadcastRou
     }
     return offset;
   });
-}
-
-/** offset.json 마커를 읽는다(계산 없음). 부재/불량이면 undefined → 라우트 404. */
-async function readOffsetMarker(filePath: string): Promise<BroadcastOffset | undefined> {
-  try {
-    const parsed = JSON.parse(await readFile(filePath, "utf8")) as BroadcastOffset;
-    return parsed?.anchor === "chzzk" && Array.isArray(parsed.segments) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
 }

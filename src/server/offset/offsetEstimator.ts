@@ -123,13 +123,22 @@ export function estimateOffsetSegments(
   soopTimes: number[],
   params: OffsetEstimatorParams = DEFAULT_ESTIMATOR_PARAMS
 ): OffsetSegment[] {
-  const all = [...chzzkTimes, ...soopTimes];
-  if (all.length === 0) {
+  if (chzzkTimes.length === 0 && soopTimes.length === 0) {
     return [];
   }
+  // Math.min/max(...대량배열)는 ~12.5만 요소에서 스택/인자 한도 초과로 RangeError → finalize가 조용히
+  // 실패한다(index.ts catch가 삼킴). 인기 방송일수록 메시지가 많으므로 반드시 단일 패스로 범위를 구한다.
+  let start = Infinity;
+  let end = -Infinity;
+  for (const time of chzzkTimes) {
+    if (time < start) start = time;
+    if (time > end) end = time;
+  }
+  for (const time of soopTimes) {
+    if (time < start) start = time;
+    if (time > end) end = time;
+  }
   const windowMs = params.windowSec * 1000;
-  const start = Math.min(...all);
-  const end = Math.max(...all);
   const tileCount = Math.max(1, Math.ceil((end - start + 1) / windowMs));
 
   const tiles = Array.from({ length: tileCount }, (_, index) => {

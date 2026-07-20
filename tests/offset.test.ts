@@ -26,19 +26,30 @@ describe("offset 부호 규약 (anchorTime = soopTime + offsetMs)", () => {
   });
 });
 
-describe("offsetAtTime", () => {
+describe("offsetAtTime (고정점 축: soopRaw + offset이 구간 범위에 드는 구간을 고른다)", () => {
   it("구간이 없으면 0(무보정)을 돌려준다", () => {
     expect(offsetAtTime([], 123)).toBe(0);
   });
 
-  it("시각을 포함하는 구간의 offsetMs를 고른다", () => {
+  it("보정된(anchor) 시각이 드는 구간의 offsetMs를 고른다", () => {
     const segments = [
       segment({ startAt: 0, endAt: 600_000, offsetMs: -3_000 }),
       segment({ startAt: 600_000, endAt: 1_200_000, offsetMs: -5_000 })
     ];
+    // raw 300000 → seg1 보정 297000 ∈ [0,600000) → -3000
     expect(offsetAtTime(segments, 300_000)).toBe(-3_000);
-    expect(offsetAtTime(segments, 600_000)).toBe(-5_000);
+    // raw 900000 → seg2 보정 895000 ∈ [600000,1200000) → -5000
     expect(offsetAtTime(segments, 900_000)).toBe(-5_000);
+  });
+
+  it("경계 부근 늦은 SOOP 메시지는 자신의 anchor가 드는 이전 구간에 속한다(raw 조회의 오배정 방지)", () => {
+    const segments = [
+      segment({ startAt: 0, endAt: 600_000, offsetMs: -8_000 }),
+      segment({ startAt: 600_000, endAt: 1_200_000, offsetMs: -3_000 })
+    ];
+    // raw 603000(경계 직후)의 진짜 anchor는 seg1 offset을 적용한 595000 → seg1(-8000)이어야 한다.
+    // (raw 조회라면 603000 ∈ seg2 → -3000으로 잘못 배정됐을 것)
+    expect(offsetAtTime(segments, 603_000)).toBe(-8_000);
   });
 
   it("첫 구간 앞은 첫 구간, 마지막 구간 뒤는 마지막 구간으로 클램프한다(선두/후미 backfill)", () => {
