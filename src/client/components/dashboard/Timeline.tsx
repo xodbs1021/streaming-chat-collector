@@ -29,6 +29,7 @@ export function Timeline({
   participationRate,
   selection,
   sessionProvider,
+  framePrimaryProvider,
   windows,
   windowSec,
   thresholds,
@@ -44,6 +45,8 @@ export function Timeline({
   selection?: TimelineSelection;
   /** 세션 탭이면 그 세션의 provider — 채팅 없는 빈 구간의 프레임 폴백에 쓴다(라이브는 undefined). */
   sessionProvider?: ChatProvider;
+  /** 과거 뷰 프레임 기준 소스 고정(치지직) — 있으면 dominant/sessionProvider보다 우선(라이브는 undefined). */
+  framePrimaryProvider?: ChatProvider;
   windows: AnalyticsWindow[];
   windowSec: number;
   thresholds: HighlightThresholds;
@@ -109,7 +112,7 @@ export function Timeline({
       return undefined;
     }
     const candidateSeconds = frameSecondsForWindow(hovered.window);
-    const primary = resolvePrimaryProvider(hovered.window.providerCounts, sessionProvider);
+    const primary = framePrimaryProvider ?? resolvePrimaryProvider(hovered.window.providerCounts, sessionProvider);
     const { loaded, byProvider } = frameAvailabilityRef.current;
     const frameCount = loaded
       ? resolveAvailableFrames(candidateSeconds, byProvider, primary, otherProvider(primary)).seconds.length
@@ -122,7 +125,7 @@ export function Timeline({
     }, FRAME_PLAYBACK_INTERVAL_MS);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hovered?.window.windowStart, sessionProvider]);
+  }, [hovered?.window.windowStart, sessionProvider, framePrimaryProvider]);
 
   useEffect(() => {
     const scroller = scrollerRef.current;
@@ -246,7 +249,8 @@ export function Timeline({
   const rendered = filled.slice(firstRenderIndex, lastRenderIndex);
 
   const hoveredCandidateSeconds = hovered ? frameSecondsForWindow(hovered.window) : [];
-  const hoveredPrimaryProvider = hovered ? resolvePrimaryProvider(hovered.window.providerCounts, sessionProvider) : (sessionProvider ?? DEFAULT_PROVIDER);
+  const hoveredPrimaryProvider =
+    framePrimaryProvider ?? (hovered ? resolvePrimaryProvider(hovered.window.providerCounts, sessionProvider) : sessionProvider ?? DEFAULT_PROVIDER);
   const hoveredResolved = frameIndexLoaded
     ? resolveAvailableFrames(hoveredCandidateSeconds, frameSecondsByProvider, hoveredPrimaryProvider, otherProvider(hoveredPrimaryProvider))
     : { provider: hoveredPrimaryProvider, seconds: hoveredCandidateSeconds };

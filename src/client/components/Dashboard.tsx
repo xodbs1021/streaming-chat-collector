@@ -17,7 +17,7 @@ import type {
   WindowComparisonSummary
 } from "../../shared/types";
 import { fetchFrameCaptureStatus, fetchFrameSeconds } from "../frameIndexClient";
-import { resolveSessionFallbackProvider } from "../frameProviderSelection";
+import { ANCHOR_FRAME_PROVIDER, resolveSessionFallbackProvider } from "../frameProviderSelection";
 import type { FrameCaptureStatus } from "../../shared/frameCaptureStatus";
 import { socket } from "../socket";
 import { fetchJson } from "./dashboard/api";
@@ -51,6 +51,8 @@ import { parseViewSelection } from "../viewSelection";
 import { FramePlayerPanel } from "./dashboard/FramePlayerPanel";
 import { buildManualCandidate, getAnnotationRange } from "./dashboard/highlight";
 import { HighlightMemoPanel } from "./dashboard/HighlightMemoPanel";
+import { OffsetBadge } from "./dashboard/OffsetBadge";
+import { liveOffsetBadge, mergedOffsetBadge } from "./dashboard/offsetBadgeText";
 import { Metric, RankList, WindowComparisonPanel } from "./dashboard/panels";
 import { countConnectedProviders } from "./dashboard/providerConnection";
 import { RecordingControls } from "./dashboard/RecordingControls";
@@ -427,6 +429,16 @@ export function DashboardRoute() {
   // 세션 탭의 빈 구간(채팅 0)에서 프레임 폴백이 그 세션 provider를 쓰도록 넘긴다 — 라이브(병합) 뷰는
   // 반드시 undefined여야 기존 dominant→chzzk 동작이 보존된다(라이브 가드는 헬퍼가 소유·단위 테스트로 고정).
   const sessionFallbackProvider = resolveSessionFallbackProvider(selectedSessionId, selectedSession?.provider);
+  // 과거 뷰(병합·세션)는 프레임 소스를 anchor(치지직)로 고정 — 라이브는 undefined로 기존 dominant 유지.
+  const framePrimaryProvider = view.kind === "live" ? undefined : ANCHOR_FRAME_PROVIDER;
+  const isMergedActive = view.kind === "merged" && recordingStatus.activeBroadcastId === view.broadcastId;
+  // 싱크 배지 — 라이브는 소켓 상태, 병합은 offset.json(활성이면 미정렬 안내). 세션 탭은 배지 없음.
+  const offsetBadgeView =
+    view.kind === "live"
+      ? liveOffsetBadge(liveOffsetStatus)
+      : view.kind === "merged"
+        ? mergedOffsetBadge(mergedOffset, isMergedActive)
+        : undefined;
 
   useEffect(() => {
     // 5초마다 실제로 캡처된 프레임 초 목록을 가져온다 — 화면(호버/재생 패널)은 이 목록에
@@ -722,6 +734,7 @@ export function DashboardRoute() {
                 ))}
               </div>
             )}
+            {offsetBadgeView && <OffsetBadge view={offsetBadgeView} />}
             {selectedSessionId === "live" && (
               <button className="ghost-button compact-button" onClick={resetLive}>
                 <RotateCcw size={16} />
@@ -835,6 +848,7 @@ export function DashboardRoute() {
             <Timeline
               focusRange={focusRange}
               frameBroadcastId={frameBroadcastId}
+              framePrimaryProvider={framePrimaryProvider}
               frameIndexLoaded={frameIndexLoaded}
               frameSecondsByProvider={frameSecondsByProvider}
               markers={markers}
@@ -889,6 +903,7 @@ export function DashboardRoute() {
           {selectedRange && (
             <FramePlayerPanel
               frameBroadcastId={frameBroadcastId}
+              framePrimaryProvider={framePrimaryProvider}
               frameCaptureStatusByProvider={frameCaptureStatusByProvider}
               frameIndexLoaded={frameIndexLoaded}
               frameSecondsByProvider={frameSecondsByProvider}

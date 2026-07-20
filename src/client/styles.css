@@ -540,6 +540,51 @@ time {
   color: #ff6b7d;
 }
 
+/* SOOP↔치지직 싱크 뱃지 — capture-badge와 같은 pill 형태, tone(계산중=앰버·확정=파랑·기록없음=회색)이 곧 의미. */
+.offset-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid rgba(143, 198, 255, 0.32);
+  border-radius: 999px;
+  background: rgba(143, 198, 255, 0.08);
+  color: #8fc6ff;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.offset-badge.offset-estimating {
+  border-color: rgba(239, 184, 101, 0.4);
+  background: rgba(239, 184, 101, 0.08);
+  color: #efb865;
+}
+
+.offset-badge.offset-none {
+  border-color: rgba(226, 255, 240, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: #9fb4ab;
+}
+
+:root[data-theme="light"] .offset-badge {
+  border-color: rgba(37, 99, 235, 0.35);
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .offset-badge.offset-estimating {
+  border-color: rgba(180, 120, 20, 0.4);
+  background: rgba(180, 120, 20, 0.1);
+  color: #9a6a12;
+}
+
+:root[data-theme="light"] .offset-badge.offset-none {
+  border-color: rgba(20, 40, 30, 0.16);
+  background: rgba(20, 40, 30, 0.05);
+  color: #566;
+}
+
 .metric-grid {
   display: grid;
   gap: 12px;
