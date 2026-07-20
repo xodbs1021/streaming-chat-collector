@@ -48,6 +48,20 @@ export function shouldCaptureLateJoin(
   return isRecording && !captureSlotOwns(slot, activeBroadcastId);
 }
 
+/**
+ * 고아가 된 선기동 캡처가 provider 싱글턴 매니저를 stop해도 되는지 판정한다.
+ * 매니저 기동 시 소유 broadcastId를 기록해두고, 여전히 내 방송이 소유 중일 때만 stop한다.
+ *   - 내 소유(managerOwner === myBroadcastId): 다음 방송이 재기동하지 않았음 → 내 고아 캡처를 stop해도 안전(R3).
+ *   - 다른 방송 소유(≠): 다음 방송이 같은 매니저를 이미 재기동함 → 그 방송의 새 캡처를 죽이면 안 되므로 stop 금지.
+ *   - 미소유(undefined): 소유자 없음 → stop 금지.
+ */
+export function shouldStopOrphanedManager(
+  managerOwner: string | undefined,
+  myBroadcastId: string
+): boolean {
+  return managerOwner === myBroadcastId;
+}
+
 /** runSingleFrameCapture가 index.ts 런타임에 의존하는 부작용 계약(캡처 기동·중지·슬롯 세팅·소유권·SOOP 조회) */
 export interface SingleFrameCaptureDeps {
   /** 이 체인이 소유한 방송 id — 슬롯을 이 방송 스코프로 minting한다. */

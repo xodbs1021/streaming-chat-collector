@@ -17,6 +17,7 @@ import {
   captureSlotOwns,
   runSingleFrameCapture,
   shouldCaptureLateJoin,
+  shouldStopOrphanedManager,
   type CaptureSlot,
   type SingleFrameCaptureDeps
 } from "./captureSource";
@@ -110,6 +111,9 @@ const singleFrameCaptureEnabled = process.env.SINGLE_FRAME_CAPTURE !== "0";
 // 프레임을 캡처 중인 단일 소스 슬롯 — { broadcastId, provider }로 방송 스코프. 기동 호출 직전 set,
 // finalize에서 그 방송 소유일 때만 리셋. 레거시 모드는 세팅하지 않는다(항상 undefined).
 let captureSlot: CaptureSlot | undefined;
+// provider별 캡처 매니저(싱글턴)를 마지막으로 기동한 방송 id — 고아 캡처가 매니저를 stop할지 판정하는 소유권 마커.
+// 기동 직전 기록. 다음 방송이 같은 매니저를 재기동하면 소유가 넘어가, 이전 방송 고아 정리가 새 캡처를 죽이지 않는다.
+const captureManagerOwner: Record<ChatProvider, string | undefined> = { chzzk: undefined, soop: undefined };
 const providerLogs: ProviderDiagnosticLog[] = [];
 const chzzkTokenPath = path.resolve(process.cwd(), config.chatDataDir, ".chzzk-token.json");
 let chzzkToken: ChzzkTokenSet | undefined = await readStoredChzzkToken(chzzkTokenPath);
@@ -505,6 +509,9 @@ async function ensureCaptureForRecording(
     return undefined;
   }
   const framesDir = broadcastPaths.frameDir(broadcastId, provider);
+  // 이 매니저의 소유를 이 방송으로 선점한다(기동 직전, 동기) — 고아 정리 시 "내가 아직 소유 중일 때만 stop"의 기준.
+  // 다음 방송이 같은 매니저를 재기동하면 여기서 소유가 넘어가, 이전 방송 고아 정리가 새 캡처를 죽이지 않는다.
+  captureManagerOwner[provider] = broadcastId;
   // 킬스위치 off: 준비 대기·상태 UX 없이 백그라운드로만 기동(구 fire-and-forget 동작).
   if (!captureSyncEnabled) {
     void manager.start(frameChannelId, framesDir).catch(() => undefined);
@@ -520,9 +527,12 @@ async function ensureCaptureForRecording(
     CAPTURE_READY_TIMEOUT_MS,
     () => recorder.getActiveBroadcastId() !== broadcastId
   );
-  // 대기 중 이 방송이 끝났으면 선기동한 캡처는 고아 — 정리하고(다음 방송 디렉토리 미침범) 상태는 손대지 않는다 [R3].
+  // 대기 중 이 방송이 끝났으면 선기동 캡처는 고아 — 단, 다음 방송이 같은 provider 싱글턴 매니저를 이미 재기동했으면
+  // 그 새 캡처를 죽이면 안 된다. 소유권이 아직 내 방송일 때만 stop한다(R3 더블클릭 정리는 유지, B 캡처 침범은 방지).
   if (recorder.getActiveBroadcastId() !== broadcastId) {
-    await manager.stop();
+    if (shouldStopOrphanedManager(captureManagerOwner[provider], broadcastId)) {
+      await manager.stop();
+    }
     return "cancelled";
   }
   const plan = planFromReadiness(readiness);

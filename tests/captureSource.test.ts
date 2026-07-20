@@ -5,6 +5,7 @@ import {
   runSingleFrameCapture,
   shouldCaptureLateJoin,
   shouldFallbackToSoop,
+  shouldStopOrphanedManager,
   type CaptureSlot,
   type SingleFrameCaptureDeps
 } from "../src/server/captureSource";
@@ -243,5 +244,21 @@ describe("runSingleFrameCapture", () => {
     await runSingleFrameCapture([CHZZK, SOOP], harness.deps);
     expect(harness.events).toEqual(["set:chzzk", "ensure:chzzk", "stop:chzzk"]);
     expect(harness.captureCalls).toEqual([{ provider: "chzzk", slotAtCall: "chzzk" }]);
+  });
+});
+
+describe("shouldStopOrphanedManager", () => {
+  it("stops when this broadcast still owns the manager (cleans its own orphan capture — R3 double-click)", () => {
+    expect(shouldStopOrphanedManager("bc-A", "bc-A")).toBe(true);
+  });
+
+  // deferred-stop 회귀: A의 폴링 재개 시점에 매니저 소유자가 B(다음 방송)면 A는 stop하면 안 된다 —
+  // B가 같은 provider 싱글턴을 이미 재기동했으므로 B의 새 캡처를 죽이면 안 된다.
+  it("does not stop when a newer broadcast has already claimed (re-armed) the manager", () => {
+    expect(shouldStopOrphanedManager("bc-B", "bc-A")).toBe(false);
+  });
+
+  it("does not stop when no broadcast owns the manager", () => {
+    expect(shouldStopOrphanedManager(undefined, "bc-A")).toBe(false);
   });
 });
