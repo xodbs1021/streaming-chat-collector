@@ -145,7 +145,11 @@ export class ChatRecorder {
 
     const receivedAt = Date.now();
     const provider = message.provider;
-    const providerSession = this.activeBroadcast ? await this.ensureProviderSession(message) : undefined;
+    // 방송 참조를 await 전에 캡처한다 — ensureProviderSession의 비동기 갭 사이에 정지→빠른 재시작이 끼면
+    // this.activeBroadcast가 다른 방송으로 바뀔 수 있고, 그러면 옛 방송(이미 finalize 정렬 마커가 붙었을 수
+    // 있음)에 뒤늦게 append돼 "정렬 마커 뒤 미정렬 라인"이 생긴다. 캡처 후 재확인해 그런 쓰기를 드랍한다.
+    const broadcast = this.activeBroadcast;
+    const providerSession = broadcast ? await this.ensureProviderSession(message) : undefined;
 
     const nextSequence = (this.sequences.get(provider) ?? 0) + 1;
     this.sequences.set(provider, nextSequence);
@@ -158,11 +162,12 @@ export class ChatRecorder {
       receivedAt
     });
 
-    if (providerSession && this.activeBroadcast) {
+    // await 사이 방송이 바뀌었으면(정지·재시작) 디스크 기록은 드랍 — 라이브 표시용 record는 그대로 반환한다.
+    if (providerSession && broadcast && this.activeBroadcast === broadcast) {
       // 상태는 동기 갱신, 디스크 쓰기는 큐로 직렬화 — 채팅 폭주 시 디스크 지연이 분석 반영을 막지 않도록.
       this.latestActiveProvider = provider;
       const nextSession = { ...providerSession, messageCount: providerSession.messageCount + 1 };
-      this.activeBroadcast.providers.set(provider, nextSession);
+      broadcast.providers.set(provider, nextSession);
       this.scheduleMetaWrite(nextSession);
       this.queueAppend(this.paths.chatFilePath(nextSession.broadcastId ?? "", provider), `${serialized.line}\n`);
     }

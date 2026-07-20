@@ -91,6 +91,31 @@ describe("병합 조회 라우트 (/api/broadcasts/:id merge)", () => {
     expect(response.statusCode).toBe(404);
   });
 
+  it("windows 200: 단일 provider 방송도 그 provider만으로 요약한다", async () => {
+    const soloId = createBroadcastId();
+    const dir = paths.chatDir(soloId, "chzzk");
+    await mkdir(dir, { recursive: true });
+    const lines = [1_000, 2_000, 3_000].map((time, index) => JSON.stringify(makeRecord("chzzk", time, index + 1)));
+    await writeFile(paths.chatFilePath(soloId, "chzzk"), `${lines.join("\n")}\n`, "utf8");
+
+    const response = await app.inject({ url: `/api/broadcasts/${soloId}/windows?windowSec=5` });
+    expect(response.statusCode).toBe(200);
+    const summary = response.json() as AnalyticsSummary;
+    expect(summary.totalMessages).toBe(3);
+    expect(summary.providerCounts.chzzk).toBe(3);
+    expect(summary.providerCounts.soop).toBeUndefined();
+  });
+
+  it("highlights 400: 형식 불량 broadcastId를 거부한다", async () => {
+    const response = await app.inject({ url: "/api/broadcasts/..%2F..%2Fetc/highlights" });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("offset 400: 형식 불량 broadcastId를 거부한다", async () => {
+    const response = await app.inject({ url: "/api/broadcasts/..%2F..%2Fetc/offset" });
+    expect(response.statusCode).toBe(400);
+  });
+
   it("offset 200: offset.json 마커를 그대로 반환한다", async () => {
     const marker: BroadcastOffset = {
       version: 1,
