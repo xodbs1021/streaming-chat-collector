@@ -34,6 +34,8 @@ export function fillTimelineWindows(windows: AnalyticsWindow[], windowSec: numbe
     // 라이브 트레일링 연장이 상한을 넘는 경우(1초 윈도우 기준 ~13.9시간의 침묵)는, 축을 마지막
     // 채팅에 얼려두면(연장 포기) 바로 이 버그가 재현된다. 상한의 목적은 배열 크기·렌더 비용 방어이므로,
     // 라이브에서 사용자가 보는 '최근 구간'을 유지하도록 오래된 앞쪽을 잘라 상한 개수만 남긴다.
+    // 알려진 한계: 이 트리밍이 발동하면 filled[0] 기준점이 밀려 스크롤/드래그 앵커가 한 번 튈 수
+    // 있으나(마커도 x=0으로 클램프), 다음 렌더에 자기교정되며 위 극단 조건에서만 발생해 방치한다.
     slotCount = MAX_FILLED_SLOTS;
     firstStart = lastStart - (MAX_FILLED_SLOTS - 1) * windowMs;
   }
@@ -43,6 +45,15 @@ export function fillTimelineWindows(windows: AnalyticsWindow[], windowSec: numbe
     const windowStart = firstStart + index * windowMs;
     return byStart.get(windowStart) ?? emptyTimelineWindow(windowStart, windowMs);
   });
+}
+
+/**
+ * 지금(`nowMs`)부터 다음 윈도우 버킷 경계까지 남은 ms. 라이브 성장 타이머의 첫 틱을 이 값만큼
+ * 늦춰 버킷 경계에 정렬한다 — 마운트 시점 기준 주기로 돌면 버킷이 바뀌어도 최대 한 윈도우 가까이
+ * 늦게 반영되기 때문. 경계 위(`nowMs % windowMs === 0`)면 꽉 찬 한 윈도우를 돌려준다.
+ */
+export function msUntilNextWindowBoundary(nowMs: number, windowMs: number): number {
+  return windowMs - (nowMs % windowMs);
 }
 
 function emptyTimelineWindow(windowStart: number, windowMs: number): AnalyticsWindow {

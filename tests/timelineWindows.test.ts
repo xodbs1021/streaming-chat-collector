@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MAX_FILLED_SLOTS } from "../src/client/components/dashboard/constants";
-import { fillTimelineWindows } from "../src/client/components/dashboard/timelineWindows";
+import { fillTimelineWindows, msUntilNextWindowBoundary } from "../src/client/components/dashboard/timelineWindows";
 import type { AnalyticsWindow } from "../src/shared/types";
 
 const WINDOW_SEC = 1;
@@ -106,5 +106,23 @@ describe("fillTimelineWindows — MAX_FILLED_SLOTS 상한", () => {
     const windows = [makeWindow(0), makeWindow((MAX_FILLED_SLOTS + 5_000) * WINDOW_MS)];
 
     expect(fillTimelineWindows(windows, WINDOW_SEC)).toBe(windows);
+  });
+});
+
+describe("msUntilNextWindowBoundary — 첫 틱을 버킷 경계에 정렬", () => {
+  it("버킷 중간이면 다음 경계까지 남은 시간을 돌려준다", () => {
+    expect(msUntilNextWindowBoundary(1_500, 1_000)).toBe(500);
+  });
+
+  it("경계 직후면 거의 한 윈도우를 기다린다", () => {
+    expect(msUntilNextWindowBoundary(1_001, 1_000)).toBe(999);
+  });
+
+  it("정확히 경계 위면 다음 경계(꽉 찬 한 윈도우)까지", () => {
+    expect(msUntilNextWindowBoundary(2_000, 1_000)).toBe(1_000);
+  });
+
+  it("윈도우가 5초여도 경계 정렬 간격을 맞춘다", () => {
+    expect(msUntilNextWindowBoundary(13_200, 5_000)).toBe(1_800);
   });
 });

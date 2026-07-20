@@ -17,7 +17,7 @@ import {
 } from "./constants";
 import { formatFrameTimestamp, formatPercent, formatTime, formatWindowRange, frameSecondsForWindow, markerColor } from "./format";
 import { formatWindowLevel, getWindowVisualLevel } from "./highlight";
-import { fillTimelineWindows } from "./timelineWindows";
+import { fillTimelineWindows, msUntilNextWindowBoundary } from "./timelineWindows";
 import { FramePreview } from "./FramePreview";
 
 export function Timeline({
@@ -115,10 +115,21 @@ export function Timeline({
     // 라이브에서 채팅이 0이면 analytics:live 푸시가 안 와 리렌더가 멎는다 — 그래서 이 버그(축이
     // 마지막 채팅에서 얼어붙음)가 난다. 라이브일 때만 윈도우 주기로 nowMs를 진행시켜 축이 현재
     // 시각까지 계속 자라게 하고, 뷰를 벗어나면 cleanup으로 타이머를 해제한다.
+    // 첫 틱은 다음 버킷 경계에 정렬한 뒤(setTimeout) 그때부터 윈도우 주기로 돈다(setInterval) —
+    // 마운트 시점 기준 주기면 버킷이 바뀌어도 최대 한 윈도우 늦게 반영되기 때문.
     setNowMs(Date.now());
     const windowMs = Math.max(1, Math.round(windowSec)) * 1000;
-    const id = window.setInterval(() => setNowMs(Date.now()), windowMs);
-    return () => window.clearInterval(id);
+    let intervalId: number | undefined;
+    const timeoutId = window.setTimeout(() => {
+      setNowMs(Date.now());
+      intervalId = window.setInterval(() => setNowMs(Date.now()), windowMs);
+    }, msUntilNextWindowBoundary(Date.now(), windowMs));
+    return () => {
+      window.clearTimeout(timeoutId);
+      if (intervalId !== undefined) {
+        window.clearInterval(intervalId);
+      }
+    };
   }, [padToNow, windowSec]);
 
   useEffect(() => {
