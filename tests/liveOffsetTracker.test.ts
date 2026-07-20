@@ -95,6 +95,75 @@ describe("LiveOffsetTracker", () => {
   });
 });
 
+describe("LiveOffsetTracker 적용 축(applied) 일관성 + 재발화 게이트", () => {
+  /** [base, base+600초] 창에 SOOP이 soopDelayMs만큼 늦은 정렬 버스트를 관측시킨다(복원 offset = −soopDelayMs). */
+  function observeAligned(tracker: LiveOffsetTracker, base: number, soopDelayMs: number) {
+    for (const time of bursts(CENTERS, 12, base)) {
+      tracker.observe("chzzk", time);
+      tracker.observe("soop", time + soopDelayMs);
+    }
+  }
+
+  it("firstConfident는 1회성 — 2번째 confident에서 재발화하지 않고 sub-2초 흔들림은 applied를 유지한다", () => {
+    let clock = 0;
+    const tracker = new LiveOffsetTracker({ clock: () => clock });
+
+    // 1주기: SOOP 8초 늦음 → 복원 −8000, 첫 신뢰(firstConfident) + applied 채택
+    observeAligned(tracker, 0, 8_000);
+    clock = 600_000;
+    const first = tracker.reestimate();
+    expect(first?.firstConfident).toBe(true);
+    const appliedAfterFirst = tracker.currentOffsetMs();
+
+    // 2주기: 1000ms 드리프트(sub-2초) — 옛 데이터는 창 밖으로(now=1_300_000, 창 [700_000, ...])
+    observeAligned(tracker, 700_000, 9_000);
+    clock = 1_300_000;
+    const second = tracker.reestimate();
+
+    expect(second).toBeUndefined(); // 재발화 안 함(retime 없음)
+    expect(tracker.currentOffsetMs()).toBe(appliedAfterFirst); // applied 불변(축 일관)
+  });
+
+  it(">2초 점프에서만 retime이 발화하고 delta 부호가 맞다", () => {
+    let clock = 0;
+    const tracker = new LiveOffsetTracker({ clock: () => clock });
+    observeAligned(tracker, 0, 8_000);
+    clock = 600_000;
+    tracker.reestimate(); // applied = −8000
+
+    // SOOP이 3초 더 늦어짐(11초 → 복원 −11000): |Δ|=3000 > 2000 → 채택
+    observeAligned(tracker, 700_000, 11_000);
+    clock = 1_300_000;
+    const jump = tracker.reestimate();
+
+    expect(jump).toBeDefined();
+    expect(jump?.firstConfident).toBe(false);
+    expect(jump?.deltaMs).toBeLessThan(0); // −11000 − (−8000) = −3000
+    expect(Math.abs((jump?.deltaMs ?? 0) - -3_000)).toBeLessThanOrEqual(1_000);
+    expect(Math.abs((tracker.currentOffsetMs() ?? 0) - -11_000)).toBeLessThanOrEqual(1_000);
+  });
+
+  it("reset 후에는 웜업이 다시 시작돼 firstConfident가 재발화한다", () => {
+    let clock = 0;
+    const tracker = new LiveOffsetTracker({ clock: () => clock });
+    observeAligned(tracker, 0, 8_000);
+    clock = 600_000;
+    expect(tracker.reestimate()?.firstConfident).toBe(true);
+
+    tracker.reset();
+    expect(tracker.getStatus().estimating).toBe(true);
+
+    observeAligned(tracker, 2_000_000, 5_000);
+    clock = 2_600_000;
+    expect(tracker.reestimate()?.firstConfident).toBe(true); // 리셋 후 다시 1회성
+  });
+
+  it("enabled=false면 getStatus.enabled가 false(배지가 '보정 꺼짐' 판단)", () => {
+    expect(new LiveOffsetTracker({ enabled: false }).getStatus().enabled).toBe(false);
+    expect(new LiveOffsetTracker().getStatus().enabled).toBe(true); // 기본 on
+  });
+});
+
 describe("LiveAnalytics.retimeProvider", () => {
   it("한 provider의 레코드를 deltaMs만큼 옮기고 집계를 배치와 일치시킨다(batch-parity)", () => {
     const records = [

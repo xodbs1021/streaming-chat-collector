@@ -14,8 +14,11 @@ export function formatOffsetSeconds(offsetMs: number): string {
   return `${sign}${Math.abs(seconds).toFixed(1)}초`;
 }
 
-/** 라이브 배지 — 소켓 offset:live 상태에서. 추정 전이면 "싱크 계산 중". */
+/** 라이브 배지 — 소켓 offset:live 상태에서. 꺼져 있으면 "보정 꺼짐", 추정 전이면 "싱크 계산 중". */
 export function liveOffsetBadge(status: LiveOffsetStatus | undefined): OffsetBadgeView {
+  if (status && !status.enabled) {
+    return { tone: "none", text: "보정 꺼짐" };
+  }
   if (!status || status.estimating || status.offsetMs === undefined) {
     return { tone: "estimating", text: "싱크 계산 중" };
   }

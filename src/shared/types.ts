@@ -129,7 +129,9 @@ export interface BroadcastOffset {
  * 내구 모델 BroadcastOffset과 별개로, 시그니처를 고정해 서버 emit ↔ 클라 구독 shape을 맞춘다.
  */
 export interface LiveOffsetStatus {
-  /** 현재 적용 중인 offset(ms) — 신뢰 추정 전이면 undefined. */
+  /** offset 싱크가 켜져 있는지(OFFSET_SYNC=0이면 false → 배지 "보정 꺼짐"). */
+  enabled: boolean;
+  /** 현재 적용(표시)에 쓰는 offset(ms) — 신뢰 추정 전이면 undefined. */
   offsetMs?: number;
   /** 현재 구간 신뢰도(0~1). */
   confidence?: number;

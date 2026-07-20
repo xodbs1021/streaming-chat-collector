@@ -24,12 +24,17 @@ describe("formatOffsetSeconds", () => {
 describe("liveOffsetBadge", () => {
   it("상태 없음/추정 중이면 '싱크 계산 중'", () => {
     expect(liveOffsetBadge(undefined)).toEqual({ tone: "estimating", text: "싱크 계산 중" });
-    const estimating: LiveOffsetStatus = { estimating: true, segmentCount: 0, carriedCount: 0 };
+    const estimating: LiveOffsetStatus = { enabled: true, estimating: true, segmentCount: 0, carriedCount: 0 };
     expect(liveOffsetBadge(estimating).tone).toBe("estimating");
   });
 
+  it("OFFSET_SYNC=0(enabled=false)이면 '보정 꺼짐'(영구 '계산 중' 오해 방지)", () => {
+    const disabled: LiveOffsetStatus = { enabled: false, estimating: true, segmentCount: 0, carriedCount: 0 };
+    expect(liveOffsetBadge(disabled)).toEqual({ tone: "none", text: "보정 꺼짐" });
+  });
+
   it("신뢰 offset이 잡히면 싱크 값을 보여준다", () => {
-    const status: LiveOffsetStatus = { estimating: false, offsetMs: -8_400, confidence: 0.7, segmentCount: 1, carriedCount: 0 };
+    const status: LiveOffsetStatus = { enabled: true, estimating: false, offsetMs: -8_400, confidence: 0.7, segmentCount: 1, carriedCount: 0 };
     expect(liveOffsetBadge(status)).toEqual({ tone: "known", text: "SOOP 싱크 -8.4초" });
   });
 });

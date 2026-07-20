@@ -76,8 +76,11 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 const liveAnalytics = new LiveAnalytics();
+// offset 싱크 킬스위치(CAPTURE_SYNC 선례) — OFFSET_SYNC=0이면 라이브 무보정·finalize 재작성 생략(현행 동작 복귀).
+const offsetSyncEnabled = process.env.OFFSET_SYNC !== "0";
 // SOOP↔치지직 라이브 offset 추적기(메모리 보정만 — 디스크 기록은 원본). finalize가 파일 정렬 담당.
-const liveOffsetTracker = new LiveOffsetTracker();
+// enabled → 꺼지면 배지가 "보정 꺼짐"으로 표시(영구 "계산 중" 오해 방지).
+const liveOffsetTracker = new LiveOffsetTracker({ enabled: offsetSyncEnabled });
 const state = new AppState(io, {
   onMessage: (message) => {
     void handleRecordedMessage(message);
@@ -95,10 +98,6 @@ const currentAdapters = new Map<ChatProvider, ProviderAdapter>();
 const connectSeq: Record<ChatProvider, number> = { chzzk: 0, soop: 0 };
 // 캡처 선기동 동기화 킬스위치 — CAPTURE_SYNC=0이면 구 fire-and-forget 동작(채팅 먼저, 캡처 백그라운드)으로 폴백.
 const captureSyncEnabled = process.env.CAPTURE_SYNC !== "0";
-// offset 싱크 킬스위치(CAPTURE_SYNC 선례) — OFFSET_SYNC=0이면 라이브 무보정·finalize 재작성 생략(현행 동작 복귀).
-const offsetSyncEnabled = process.env.OFFSET_SYNC !== "0";
-// retime 게이트 — 웜업 종료(첫 신뢰) 시 1회, 이후 offset 변화가 이 임계를 넘을 때만 과거 append분을 재배치.
-const RETIME_MIN_DELTA_MS = 2_000;
 const providerLogs: ProviderDiagnosticLog[] = [];
 const chzzkTokenPath = path.resolve(process.cwd(), config.chatDataDir, ".chzzk-token.json");
 let chzzkToken: ChzzkTokenSet | undefined = await readStoredChzzkToken(chzzkTokenPath);
@@ -133,12 +132,10 @@ const offsetReestimateTimer = setInterval(() => {
   if (!offsetSyncEnabled) {
     return;
   }
+  // 트래커가 채택(retime 동반) 시에만 change를 돌려준다 — 게이트(첫 신뢰|Δ>2초)는 트래커가 소유해
+  // correct()의 applied 축과 retime이 갈라지지 않게 한다.
   const change = liveOffsetTracker.reestimate();
-  if (!change) {
-    return;
-  }
-  // 웜업 종료(첫 신뢰) 시 1회, 이후 |delta|>2초일 때만 과거 SOOP append분을 새 축으로 재배치한다.
-  if (change.firstConfident || Math.abs(change.deltaMs) > RETIME_MIN_DELTA_MS) {
+  if (change) {
     liveAnalytics.retimeProvider("soop", change.deltaMs);
     // retime은 과거 버킷을 통째로 바꾸므로, partial 병합이 스테일 버킷을 남기지 않게 전체 summary를 1회 강제 방출.
     io.emit("analytics:live", liveAnalytics.getSummary(recorder.getActiveSession()));
@@ -186,7 +183,16 @@ app.post<{ Body: Partial<OverlaySettings> }>("/api/settings", async (request) =>
   return applySettingsPatch(request.body ?? {});
 });
 
-registerAnalyticsRoutes(app, { recorder, liveAnalytics, io, onLiveReset: () => liveOffsetTracker.reset() });
+registerAnalyticsRoutes(app, {
+  recorder,
+  liveAnalytics,
+  io,
+  onLiveReset: () => {
+    liveOffsetTracker.reset();
+    // 배지 스테일 해소 — 리셋 즉시 새 상태(estimating)를 방출한다.
+    io.emit("offset:live", liveOffsetTracker.getStatus());
+  }
+});
 registerProviderRoutes(app, { state, providerLogs, connectProvider, disconnectProvider });
 registerAuthRoutes(app, { state, getChzzkToken, setChzzkToken });
 registerFrameRoutes(app, { frameManagers: frameCaptureManagers, frameReader });
@@ -282,6 +288,10 @@ async function startRecording() {
     return;
   }
   recordingGrace.cancel();
+  // offset은 방송 단위 스코프 — 새 방송은 웜업부터 다시 시작한다(옛 방송의 축을 이어쓰지 않음).
+  if (offsetSyncEnabled) {
+    liveOffsetTracker.reset();
+  }
   const broadcast = await recorder.startRecording(providers);
   if (broadcast) {
     appendProviderLog({
