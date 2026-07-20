@@ -2,9 +2,15 @@ import { Clock } from "lucide-react";
 import type { RecordingSession } from "../../../shared/types";
 import type { BroadcastGroup } from "./broadcastGroups";
 import { defaultSessionOf } from "./broadcastGroups";
+import { mergedViewId } from "../../viewSelection";
 import { PROVIDER_LABEL } from "./constants";
 import { formatBroadcastName } from "./format";
 import { SessionFilters, SessionMetaEditor } from "./SessionFilters";
+
+/** 방송 행 클릭 시 기본 선택 뷰 — provider ≥2면 합쳐 보기(merged), 아니면 기본 provider 세션. */
+function groupSelectionId(group: BroadcastGroup): string {
+  return group.sessions.length >= 2 && group.broadcastId ? mergedViewId(group.broadcastId) : defaultSessionOf(group).sessionId;
+}
 
 export function SessionSidebar({
   liveTotalMessages,
@@ -48,16 +54,19 @@ export function SessionSidebar({
         <SessionMetaEditor displayName={displayNameDraft} onDisplayNameChange={onDisplayNameChange} onSave={onSaveDisplayName} />
       )}
       {visibleGroups.map((group) => {
-        // 방송 1행 — 클릭 시 기본 provider 세션을 선택하고, 탭이 형제 provider로 전환한다.
-        const primary = defaultSessionOf(group);
-        const isActive = group.sessions.some((session) => session.sessionId === selectedSessionId);
+        // 방송 1행 — 클릭 시 기본 뷰(형제 ≥2면 합쳐 보기)를 선택하고, 탭이 다른 뷰로 전환한다.
+        const selectionId = groupSelectionId(group);
+        // 형제 세션 중 하나거나 이 방송의 병합 뷰를 보고 있으면 활성.
+        const isActive =
+          group.sessions.some((session) => session.sessionId === selectedSessionId) ||
+          (group.broadcastId !== undefined && selectedSessionId === mergedViewId(group.broadcastId));
         // 배지가 있는 다중 provider 행만 3열 그리드로 — 단일/실시간 행은 2열 유지(카운트가 뜨지 않게).
         const hasBadges = group.sessions.length >= 2;
         return (
           <button
             className={`session-row ${isActive ? "active" : ""} ${hasBadges ? "has-badges" : ""}`}
             key={group.groupKey}
-            onClick={() => onSelectSession(primary.sessionId)}
+            onClick={() => onSelectSession(selectionId)}
           >
             <span>{formatBroadcastName(group)}</span>
             {group.sessions.length >= 2 && (
