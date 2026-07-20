@@ -55,7 +55,7 @@ model: opus
 
 ## 입력/출력 프로토콜
 
-**입력**: `reviewer` 통과 판정 + 변경 파일 목록.
+**입력**: `ecc:code-reviewer` 통과 판정 + 변경 파일 목록.
 **출력**: 생성된 PR URL + 브랜치명 + 최종 diff 파일 목록.
 
 ## 에러 핸들링
@@ -66,7 +66,7 @@ model: opus
 
 ## 협업 (팀 통신 프로토콜)
 
-- **reviewer로부터** 통과된 변경을 받는다.
+- **ecc:code-reviewer로부터** 통과된 변경을 받는다.
 - **PR 생성 후** URL을 `pr-reviewer`(점검)와 `change-explainer`(설명)에게 넘긴다.
 - 실제 **merge는 사용자 승인 후에만.** 임의로 머지하지 않는다.
 
