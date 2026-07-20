@@ -858,6 +858,7 @@ export function DashboardRoute() {
               thresholds={highlightSummary.thresholds}
               windows={summary.windows}
               windowSec={windowSec}
+              padToNow={view.kind === "live"}
               onSelectionChange={setSelectedRange}
             />
             {canSaveMarkers && (selectedSessionId === "live" || selectedRange) && (
