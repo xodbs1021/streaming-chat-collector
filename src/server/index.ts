@@ -28,6 +28,7 @@ import { registerAnalyticsRoutes } from "./routes/analytics";
 import { registerAuthRoutes } from "./routes/auth";
 import { registerProviderRoutes } from "./routes/providers";
 import { registerFrameRoutes } from "./routes/frames";
+import { registerBroadcastRoutes } from "./routes/broadcasts";
 import type {
   BroadcastProviderRef,
   ChatMessage,
@@ -189,6 +190,7 @@ registerAnalyticsRoutes(app, { recorder, liveAnalytics, io, onLiveReset: () => l
 registerProviderRoutes(app, { state, providerLogs, connectProvider, disconnectProvider });
 registerAuthRoutes(app, { state, getChzzkToken, setChzzkToken });
 registerFrameRoutes(app, { frameManagers: frameCaptureManagers, frameReader });
+registerBroadcastRoutes(app, { recorder, paths: broadcastPaths });
 
 // SPA 폴백 — 정적 파일과 겹치지 않는 경로(관리 화면 등 클라이언트 라우트)만 여기로 들어온다.
 // 매번 서버 재시작 없이 최신 빌드 파일을 반영하려면 정적 플러그인이 자체 와일드카드로
