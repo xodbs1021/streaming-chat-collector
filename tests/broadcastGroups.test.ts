@@ -4,6 +4,7 @@ import {
   findGroupOf,
   groupSessionsByBroadcast
 } from "../src/client/components/dashboard/broadcastGroups";
+import { formatBroadcastName, formatSessionName } from "../src/client/components/dashboard/format";
 import type { RecordingSession } from "../src/shared/types";
 
 function makeSession(overrides: Partial<RecordingSession> & Pick<RecordingSession, "sessionId" | "provider">): RecordingSession {
@@ -96,6 +97,33 @@ describe("findGroupOf", () => {
     const groups = groupSessionsByBroadcast([makeSession({ sessionId: "b1__chzzk", broadcastId: "b1", provider: "chzzk" })]);
 
     expect(findGroupOf(groups, "live")).toBeUndefined();
+  });
+});
+
+describe("formatBroadcastName", () => {
+  it("falls back to formatSessionName for a single-session (legacy) group", () => {
+    const only = makeSession({ sessionId: "legacy-1", provider: "chzzk", displayName: "밤샘방송" });
+    const [group] = groupSessionsByBroadcast([only]);
+
+    expect(formatBroadcastName(group)).toBe(formatSessionName(only));
+  });
+
+  it("uses the group displayName for a multi-provider group when present", () => {
+    const chzzk = makeSession({ sessionId: "b1__chzzk", broadcastId: "b1", provider: "chzzk", displayName: "롤 랭크" });
+    const soop = makeSession({ sessionId: "b1__soop", broadcastId: "b1", provider: "soop" });
+    const [group] = groupSessionsByBroadcast([chzzk, soop]);
+
+    expect(formatBroadcastName(group)).toBe("롤 랭크");
+  });
+
+  it("drops the provider suffix for a multi-provider group so it does not clash with the badges", () => {
+    const chzzk = makeSession({ sessionId: "b1__chzzk", broadcastId: "b1", provider: "chzzk", startedAt: 1_000 });
+    const soop = makeSession({ sessionId: "b1__soop", broadcastId: "b1", provider: "soop", startedAt: 2_000 });
+    const [group] = groupSessionsByBroadcast([chzzk, soop]);
+
+    const name = formatBroadcastName(group);
+    expect(name).not.toMatch(/chzzk|soop|치지직/i);
+    expect(name).not.toContain("·");
   });
 });
 
