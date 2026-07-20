@@ -19,6 +19,11 @@ export class BroadcastPaths {
     return path.join(this.broadcastDir(broadcastId), "broadcast.meta.json");
   }
 
+  /** 방송 단위 offset 마커 — 존재 = "이 방송 파일은 anchor 축으로 정렬됨"(finalize 멱등 가드). */
+  offsetFilePath(broadcastId: string): string {
+    return path.join(this.broadcastDir(broadcastId), "offset.json");
+  }
+
   chatDir(broadcastId: string, provider: ChatProvider): string {
     return path.join(this.broadcastDir(broadcastId), "chat", provider);
   }
