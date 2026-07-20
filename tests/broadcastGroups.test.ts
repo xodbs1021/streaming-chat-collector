@@ -82,6 +82,19 @@ describe("groupSessionsByBroadcast", () => {
     expect(named.displayName).toBe("롤 랭크");
     expect(unnamed.displayName).toBeUndefined();
   });
+
+  it("adopts a sibling provider's displayName when the PROVIDER_ORDER-first session has none", () => {
+    const chzzk = makeSession({ sessionId: "b1__chzzk", broadcastId: "b1", provider: "chzzk" });
+    const soop = makeSession({ sessionId: "b1__soop", broadcastId: "b1", provider: "soop", displayName: "숲 방송" });
+
+    const [group] = groupSessionsByBroadcast([chzzk, soop]);
+
+    expect(group.displayName).toBe("숲 방송");
+  });
+
+  it("returns an empty array for no sessions", () => {
+    expect(groupSessionsByBroadcast([])).toEqual([]);
+  });
 });
 
 describe("findGroupOf", () => {
@@ -116,12 +129,21 @@ describe("formatBroadcastName", () => {
     expect(formatBroadcastName(group)).toBe("롤 랭크");
   });
 
-  it("drops the provider suffix for a multi-provider group so it does not clash with the badges", () => {
+  it("falls back to the KST-formatted start date for a nameless multi-provider group", () => {
     const chzzk = makeSession({ sessionId: "b1__chzzk", broadcastId: "b1", provider: "chzzk", startedAt: 1_000 });
     const soop = makeSession({ sessionId: "b1__soop", broadcastId: "b1", provider: "soop", startedAt: 2_000 });
     const [group] = groupSessionsByBroadcast([chzzk, soop]);
 
+    // 그룹 startedAt = 형제 최소(1_000). 이름은 provider 접미사 없이 KST 날짜만이어야 한다(브라우저 TZ 무관).
+    const expectedDate = new Intl.DateTimeFormat("ko-KR", {
+      timeZone: "Asia/Seoul",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    }).format(1_000);
     const name = formatBroadcastName(group);
+    expect(name).toBe(expectedDate);
     expect(name).not.toMatch(/chzzk|soop|치지직/i);
     expect(name).not.toContain("·");
   });

@@ -16,7 +16,6 @@ import type {
 } from "../../shared/types";
 import { fetchFrameCaptureStatus, fetchFrameSeconds } from "../frameIndexClient";
 import type { FrameCaptureStatus } from "../../shared/frameCaptureStatus";
-import { PROVIDER_ORDER } from "../frameProviderSelection";
 import { socket } from "../socket";
 import { fetchJson } from "./dashboard/api";
 import { avgMessageLength, maxWindow, mergePartialSummary } from "./dashboard/analytics";
@@ -49,6 +48,7 @@ import { FramePlayerPanel } from "./dashboard/FramePlayerPanel";
 import { buildManualCandidate, getAnnotationRange } from "./dashboard/highlight";
 import { HighlightMemoPanel } from "./dashboard/HighlightMemoPanel";
 import { Metric, RankList, WindowComparisonPanel } from "./dashboard/panels";
+import { countConnectedProviders } from "./dashboard/providerConnection";
 import { RecordingControls } from "./dashboard/RecordingControls";
 import { SessionSidebar } from "./dashboard/SessionSidebar";
 import { SpikeToasts } from "./dashboard/SpikeToasts";
@@ -141,12 +141,7 @@ export function DashboardRoute() {
         chzzk: statuses.chzzk?.state === "connected" ? statuses.chzzk.viewerCount : undefined,
         soop: statuses.soop?.state === "connected" ? statuses.soop.viewerCount : undefined
       });
-      // 녹화 버튼 활성 판정 — 서버 connectedProviderRefs(index.ts:288)와 동일 술어(연결/재연결 중)를 미러한다.
-      const connected = PROVIDER_ORDER.filter((provider) => {
-        const state = statuses[provider]?.state;
-        return state === "connected" || state === "reconnecting";
-      }).length;
-      setConnectedCount(connected);
+      setConnectedCount(countConnectedProviders(statuses));
     };
 
     socket.on("recording:status", onRecordingStatus);
@@ -416,9 +411,12 @@ export function DashboardRoute() {
     };
   }, [frameBroadcastId]);
 
-  const visibleSessions = filterSessions(sessions, sessionProviderFilter, sessionDateFilter);
-  // 평면 세션 목록을 방송 단위로 묶는다 — visibleSessions가 매 렌더 새 배열이고 그룹핑은 소규모 O(n)이라 useMemo 불필요.
-  const groups = groupSessionsByBroadcast(visibleSessions);
+  // recording:status 등으로 리렌더가 잦으므로 필터·그룹핑을 메모이즈 — 입력(세션·필터)이 바뀔 때만 재계산.
+  const visibleSessions = useMemo(
+    () => filterSessions(sessions, sessionProviderFilter, sessionDateFilter),
+    [sessions, sessionProviderFilter, sessionDateFilter]
+  );
+  const groups = useMemo(() => groupSessionsByBroadcast(visibleSessions), [visibleSessions]);
   const selectedGroup = selectedSessionId !== "live" ? findGroupOf(groups, selectedSessionId) : undefined;
   // idle 상태(미연결/비활성)는 상단 뱃지에서 숨긴다 — 문제가 있는 provider만 나란히 노출한다.
   const captureBadges = (["chzzk", "soop"] as const)

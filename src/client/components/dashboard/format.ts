@@ -119,7 +119,9 @@ function formatDateInput(timestamp: number) {
 }
 
 function formatDate(timestamp: number) {
+  // 브라우저 로컬 TZ와 무관하게 항상 KST — 사이드바 방송/세션 이름의 날짜가 형제·프레임 시각과 어긋나지 않게.
   return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",

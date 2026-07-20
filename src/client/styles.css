@@ -349,7 +349,7 @@ time {
   width: 100%;
   align-items: center;
   gap: 10px;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto;
   min-height: 46px;
   margin-top: 8px;
   padding: 0 10px;
@@ -359,6 +359,11 @@ time {
   color: #dff6ea;
   cursor: pointer;
   text-align: left;
+}
+
+/* 배지가 있는 다중 provider 행만 3열(이름·배지·카운트). 단일/실시간 행은 2열 유지. */
+.session-row.has-badges {
+  grid-template-columns: 1fr auto auto;
 }
 
 /* 다중 provider 방송 행 — provider를 배지로 전달(이름에선 접미사 생략). 색이 곧 플랫폼 식별. */
@@ -469,6 +474,12 @@ time {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+/* aria-disabled 버튼 — 포커스는 가능하되(툴팁 도달) 비활성 외관을 준다 */
+.recording-controls button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* grace(유예) 상태 표식 — 앰버 계열로 "자동 종료 대기 중"을 색으로 전달 */

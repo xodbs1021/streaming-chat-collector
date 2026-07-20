@@ -51,9 +51,11 @@ export function SessionSidebar({
         // 방송 1행 — 클릭 시 기본 provider 세션을 선택하고, 탭이 형제 provider로 전환한다.
         const primary = defaultSessionOf(group);
         const isActive = group.sessions.some((session) => session.sessionId === selectedSessionId);
+        // 배지가 있는 다중 provider 행만 3열 그리드로 — 단일/실시간 행은 2열 유지(카운트가 뜨지 않게).
+        const hasBadges = group.sessions.length >= 2;
         return (
           <button
-            className={`session-row ${isActive ? "active" : ""}`}
+            className={`session-row ${isActive ? "active" : ""} ${hasBadges ? "has-badges" : ""}`}
             key={group.groupKey}
             onClick={() => onSelectSession(primary.sessionId)}
           >

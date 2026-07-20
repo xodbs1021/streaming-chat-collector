@@ -18,10 +18,26 @@ export function RecordingControls({
   onStop(): void;
 }) {
   const { label, disabled, tooltip, showGracePill } = formatRecordingLabel(recordingState, connectedCount);
-  const handleClick = recordingState === "idle" ? onStart : onStop;
+  // 네이티브 disabled는 포커스를 막아 툴팁(비활성 사유)이 키보드로 도달 못 한다 → aria-disabled로 포커스는 열어두고 클릭만 가드.
+  function handleClick() {
+    if (disabled) {
+      return;
+    }
+    if (recordingState === "idle") {
+      onStart();
+    } else {
+      onStop();
+    }
+  }
   return (
     <div className="recording-controls">
-      <button className="ghost-button compact-button" disabled={disabled} onClick={handleClick} title={tooltip} type="button">
+      <button
+        aria-disabled={disabled}
+        className="ghost-button compact-button"
+        onClick={handleClick}
+        title={tooltip}
+        type="button"
+      >
         {recordingState === "idle" ? <Circle size={15} /> : <Square size={15} />}
         {label}
       </button>
