@@ -82,6 +82,67 @@ export interface BroadcastSession {
   archivedAt?: number;
 }
 
+/**
+ * offset 추정기 상수 — 한 offset 값을 계산하는 데이터 구간·상관 정밀도·탐색폭·라이브 재계산 주기.
+ * 전부 실측 후 한 줄로 조정 가능한 파라미터(BroadcastOffset.params에 그대로 박혀 재현성을 준다).
+ */
+export interface OffsetEstimatorParams {
+  /** 한 offset 값을 계산하는 데이터 구간(초). */
+  windowSec: number;
+  /** 봉우리 상관을 계산하는 bin 크기(초) = 보정 정밀도. */
+  binSec: number;
+  /** offset 탐색 범위(±초). */
+  searchSec: number;
+  /** 라이브 재추정 주기(초). */
+  reestimateSec: number;
+}
+
+/**
+ * 한 구간의 offset 추정 결과. 부호 규약: anchorTime = soopTime + offsetMs (SOOP이 늦으면 음수).
+ * startAt/endAt은 절대시각(ms) — 구간 경계는 offset(초)보다 훨씬 크므로(구간 600초) 조회 축은 무해.
+ */
+export interface OffsetSegment {
+  startAt: number;
+  endAt: number;
+  offsetMs: number;
+  /** 0~1 신뢰도 — 피크 강도 × runner-up 대비. */
+  confidence: number;
+  /** 직전 신뢰값 이어쓰기(조용/저신뢰 구간)면 true = 화면에 "추정치" 표시. */
+  carried: boolean;
+}
+
+/**
+ * 방송 하나의 내구성 offset 모델 — finalize가 전체 채팅으로 계산해 `<broadcastId>/offset.json`에 저장한다.
+ * 이 파일의 존재 자체가 "이 방송 파일은 정렬됨" 마커(멱등 가드). 라이브 배지의 LiveOffsetStatus와는 별개.
+ */
+export interface BroadcastOffset {
+  version: number;
+  anchor: "chzzk";
+  target: "soop";
+  computedAt: number;
+  params: OffsetEstimatorParams;
+  segments: OffsetSegment[];
+}
+
+/**
+ * 라이브 offset 배지 페이로드(`offset:live` 소켓 이벤트) — 배지가 쓰는 최소 필드만.
+ * 내구 모델 BroadcastOffset과 별개로, 시그니처를 고정해 서버 emit ↔ 클라 구독 shape을 맞춘다.
+ */
+export interface LiveOffsetStatus {
+  /** offset 싱크가 켜져 있는지(OFFSET_SYNC=0이면 false → 배지 "보정 꺼짐"). */
+  enabled: boolean;
+  /** 현재 적용(표시)에 쓰는 offset(ms) — 신뢰 추정 전이면 undefined. */
+  offsetMs?: number;
+  /** 현재 구간 신뢰도(0~1). */
+  confidence?: number;
+  /** 웜업/재계산 중이라 아직 신뢰 추정이 없으면 true. */
+  estimating: boolean;
+  /** 계산된 구간 수. */
+  segmentCount: number;
+  /** 그중 carry(추정치) 구간 수. */
+  carriedCount: number;
+}
+
 /** 녹화 라이프사이클 상태. idle=비녹화, recording=저장 중, grace=방송종료 감지 후 자동종료 대기. */
 export type RecordingState = "idle" | "recording" | "grace";
 
@@ -331,6 +392,8 @@ export interface ServerToClientEvents {
   "chat:history": (messages: ChatMessage[]) => void;
   "recording:status": (status: RecordingStatus) => void;
   "analytics:live": (summary: AnalyticsSummary) => void;
+  /** 라이브 SOOP↔치지직 싱크 배지용 — 접속 시 1회 + 60초 재추정마다 방출. */
+  "offset:live": (status: LiveOffsetStatus) => void;
 }
 
 export interface ClientToServerEvents {

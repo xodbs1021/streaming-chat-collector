@@ -310,6 +310,21 @@ export class LiveAnalytics {
     return [...this.records];
   }
 
+  /**
+   * 한 provider의 이미 append된 레코드 timestamp를 deltaMs만큼 옮기고 집계를 재구축한다.
+   * offset 재추정으로 SOOP 표시 축이 바뀔 때, 과거 append분을 새 축으로 재배치하기 위한 것.
+   * O(전체) 재구축이므로 실시간 경로가 아니라 60초 재추정 시점(그것도 |delta|가 유의미할 때)에만 호출한다.
+   */
+  retimeProvider(provider: ChatProvider, deltaMs: number) {
+    if (deltaMs === 0) {
+      return;
+    }
+    this.records = this.records
+      .map((record) => (record.provider === provider ? { ...record, timestamp: record.timestamp + deltaMs } : record))
+      .sort((left, right) => left.timestamp - right.timestamp);
+    this.rebuildAggregates();
+  }
+
   private insertSorted(record: ChatRecord) {
     const last = this.records.at(-1);
     if (!last || record.timestamp >= last.timestamp) {

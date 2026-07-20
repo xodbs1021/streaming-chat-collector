@@ -7,6 +7,12 @@ const FRAME_MATCH_TOLERANCE_SEC = 15;
 /** dominant도 세션 provider도 없을 때(라이브 병합 뷰의 빈 구간) 마지막으로 기대는 플랫폼 */
 export const DEFAULT_PROVIDER: ChatProvider = "chzzk";
 
+/**
+ * 과거 뷰(합쳐 보기·세션 탭)에서 프레임 기준 소스를 고정하는 플랫폼 = anchor(치지직).
+ * 채팅 탭과 무관하게 프레임은 이 소스로 고정(없으면 SOOP 폴백). 라이브 뷰에는 적용하지 않는다.
+ */
+export const ANCHOR_FRAME_PROVIDER: ChatProvider = "chzzk";
+
 /** 세션 선택 상태에서 라이브(여러 방송 병합) 뷰를 가리키는 센티넬 id */
 const LIVE_SESSION_ID = "live";
 

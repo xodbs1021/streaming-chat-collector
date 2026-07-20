@@ -45,6 +45,23 @@ describe("FramePlayerPanel · 빈 구간 프레임 폴백", () => {
     expect(frame?.getAttribute("src")).toContain("/api/frames/soop/");
   });
 
+  it("과거 뷰 프레임 고정: framePrimaryProvider='chzzk'면 SOOP 세션이어도 기본 프레임이 치지직이다", () => {
+    render(
+      <FramePlayerPanel
+        range={{ startAt: 10_000, endAt: 15_000 }}
+        windows={[emptyChatWindow(10_000, 15_000)]}
+        frameSecondsByProvider={{}}
+        frameIndexLoaded={false}
+        sessionProvider="soop"
+        framePrimaryProvider="chzzk"
+      />
+    );
+
+    // 프레임 기준 소스가 치지직으로 고정 — sessionProvider(soop)보다 우선.
+    expect(screen.getByRole("tab", { name: "치지직" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "SOOP" })).toHaveAttribute("aria-selected", "false");
+  });
+
   it("라이브(병합) 뷰의 빈 구간에서는 sessionProvider가 없어 치지직 폴백을 유지한다(라이브 동작 보존)", () => {
     const { container } = render(
       <FramePlayerPanel

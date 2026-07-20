@@ -3,11 +3,13 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AnalyticsSummary,
   AnalyticsWindow,
+  BroadcastOffset,
   ChatProvider,
   HighlightAnnotation,
   HighlightCandidate,
   HighlightCategory,
   HighlightSummary,
+  LiveOffsetStatus,
   ProviderStatusMap,
   RecordingSession,
   RecordingStatus,
@@ -15,7 +17,7 @@ import type {
   WindowComparisonSummary
 } from "../../shared/types";
 import { fetchFrameCaptureStatus, fetchFrameSeconds } from "../frameIndexClient";
-import { resolveSessionFallbackProvider } from "../frameProviderSelection";
+import { ANCHOR_FRAME_PROVIDER, resolveSessionFallbackProvider } from "../frameProviderSelection";
 import type { FrameCaptureStatus } from "../../shared/frameCaptureStatus";
 import { socket } from "../socket";
 import { fetchJson } from "./dashboard/api";
@@ -45,9 +47,12 @@ import {
 } from "./dashboard/format";
 import { BroadcastTabs } from "./dashboard/BroadcastTabs";
 import { findGroupOf, groupSessionsByBroadcast } from "./dashboard/broadcastGroups";
+import { parseViewSelection } from "../viewSelection";
 import { FramePlayerPanel } from "./dashboard/FramePlayerPanel";
 import { buildManualCandidate, getAnnotationRange } from "./dashboard/highlight";
 import { HighlightMemoPanel } from "./dashboard/HighlightMemoPanel";
+import { OffsetBadge } from "./dashboard/OffsetBadge";
+import { liveOffsetBadge, mergedOffsetBadge } from "./dashboard/offsetBadgeText";
 import { Metric, RankList, WindowComparisonPanel } from "./dashboard/panels";
 import { countConnectedProviders } from "./dashboard/providerConnection";
 import { RecordingControls } from "./dashboard/RecordingControls";
@@ -91,6 +96,9 @@ export function DashboardRoute() {
   const [frameSecondsByProvider, setFrameSecondsByProvider] = useState<Partial<Record<ChatProvider, number[]>>>({});
   const [frameCaptureStatusByProvider, setFrameCaptureStatusByProvider] = useState<Partial<Record<ChatProvider, FrameCaptureStatus>>>({});
   const [frameIndexLoaded, setFrameIndexLoaded] = useState(false);
+  // 라이브 배지용(offset:live 소켓) / 병합 뷰 배지용(offset.json). 각각 라이브·과거 방송에서만 유효.
+  const [liveOffsetStatus, setLiveOffsetStatus] = useState<LiveOffsetStatus | undefined>();
+  const [mergedOffset, setMergedOffset] = useState<BroadcastOffset | undefined>();
   const windowSecRef = useRef(windowSec);
   const selectedSessionIdRef = useRef(selectedSessionId);
   const lastSpikeWindowRef = useRef(0);
@@ -145,14 +153,18 @@ export function DashboardRoute() {
       setConnectedCount(countConnectedProviders(statuses));
     };
 
+    const onOffsetLive = (status: LiveOffsetStatus) => setLiveOffsetStatus(status);
+
     socket.on("recording:status", onRecordingStatus);
     socket.on("analytics:live", onLiveAnalytics);
     socket.on("provider:statuses", onProviderStatuses);
+    socket.on("offset:live", onOffsetLive);
 
     return () => {
       socket.off("recording:status", onRecordingStatus);
       socket.off("analytics:live", onLiveAnalytics);
       socket.off("provider:statuses", onProviderStatuses);
+      socket.off("offset:live", onOffsetLive);
     };
   }, []);
 
@@ -168,6 +180,7 @@ export function DashboardRoute() {
     setSelectedRange(undefined);
     setFocusRange(undefined);
     setSaveState({});
+    setMergedOffset(undefined);
   }, [selectedSessionId, windowSec]);
 
   useEffect(() => {
@@ -261,17 +274,26 @@ export function DashboardRoute() {
   }, [recordingStatus, selectedSessionId]);
 
   useEffect(() => {
-    if (selectedSessionId === "live") {
+    const view = parseViewSelection(selectedSessionId);
+    if (view.kind === "live") {
+      return undefined;
+    }
+    // 활성(녹화 중) 방송의 병합은 파일이 아직 미정렬 — 차트를 그리지 않는다(오해 소지 있는 어긋난 차트 금지).
+    if (view.kind === "merged" && recordingStatus.activeBroadcastId === view.broadcastId) {
+      setSessionSummary(undefined);
       return undefined;
     }
     let cancelled = false;
     const keywordParam = keywords.length > 0 ? `&keywords=${encodeURIComponent(keywords.join(","))}` : "";
+    // 병합은 정렬된 파일을 단순 concat하는 /api/broadcasts, 단일 세션은 기존 /api/analytics/sessions.
+    const windowsUrl =
+      view.kind === "merged"
+        ? `/api/broadcasts/${encodeURIComponent(view.broadcastId)}/windows?windowSec=${windowSec}${keywordParam}`
+        : `/api/analytics/sessions/${encodeURIComponent(selectedSessionId)}/windows?windowSec=${windowSec}${keywordParam}`;
 
     async function loadSessionWindows() {
       try {
-        const next = await fetchJson<AnalyticsSummary>(
-          `/api/analytics/sessions/${encodeURIComponent(selectedSessionId)}/windows?windowSec=${windowSec}${keywordParam}`
-        );
+        const next = await fetchJson<AnalyticsSummary>(windowsUrl);
         if (!cancelled) {
           setSessionSummary(next);
         }
@@ -288,13 +310,45 @@ export function DashboardRoute() {
         window.clearInterval(intervalId);
       }
     };
-  }, [selectedSessionId, windowSec, keywords, isSelectedSessionActive]);
+  }, [selectedSessionId, windowSec, keywords, isSelectedSessionActive, recordingStatus.activeBroadcastId]);
 
   useEffect(() => {
-    if (selectedSessionId === "live") {
+    const view = parseViewSelection(selectedSessionId);
+    if (view.kind === "live") {
       return undefined;
     }
     let cancelled = false;
+
+    // 병합(합쳐 보기) — 읽기 전용: 하이라이트는 병합 API, 마커는 치지직 세션 것 표시(저장 불가),
+    // window-compare는 병합에 없어 비우고, offset.json은 배지용으로 읽는다(부재=보정 기록 없음).
+    if (view.kind === "merged") {
+      const isMergedActive = recordingStatus.activeBroadcastId === view.broadcastId;
+      const broadcastId = view.broadcastId;
+      async function loadMergedDetails() {
+        const [highlightsResult, markersResult, offsetResult] = await Promise.allSettled([
+          isMergedActive
+            ? Promise.resolve(emptyHighlightSummary)
+            : fetchJson<HighlightSummary>(`/api/broadcasts/${encodeURIComponent(broadcastId)}/highlights?windowSec=${windowSec}`),
+          fetchJson<{ sessionId: string; markers: TimelineMarker[] }>(
+            `/api/analytics/sessions/${encodeURIComponent(`${broadcastId}__chzzk`)}/markers`
+          ),
+          fetchJson<BroadcastOffset>(`/api/broadcasts/${encodeURIComponent(broadcastId)}/offset`)
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setHighlightSummary(highlightsResult.status === "fulfilled" ? highlightsResult.value : emptyHighlightSummary);
+        setWindowComparison(emptyComparison);
+        setMarkers(markersResult.status === "fulfilled" ? markersResult.value.markers : []);
+        setMarkersSessionId(markersResult.status === "fulfilled" ? markersResult.value.sessionId : undefined);
+        setCanSaveMarkers(false);
+        setMergedOffset(offsetResult.status === "fulfilled" ? offsetResult.value : undefined);
+      }
+      void loadMergedDetails();
+      return () => {
+        cancelled = true;
+      };
+    }
 
     async function loadSessionDetails() {
       try {
@@ -323,7 +377,7 @@ export function DashboardRoute() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [selectedSessionId, windowSec, isSelectedSessionActive]);
+  }, [selectedSessionId, windowSec, isSelectedSessionActive, recordingStatus.activeBroadcastId]);
 
   useEffect(() => {
     if (selectedSessionId !== "live") {
@@ -357,20 +411,34 @@ export function DashboardRoute() {
     }, SPIKE_TOAST_LIFETIME_MS);
   }, [liveSummary, highlightSummary, selectedSessionId]);
 
-  const summary = selectedSessionId === "live" ? liveSummary : sessionSummary ?? emptySummary;
+  const view = parseViewSelection(selectedSessionId);
+  const summary = view.kind === "live" ? liveSummary : sessionSummary ?? emptySummary;
   summaryWindowsRef.current = summary.windows;
   const activeSessions = recordingStatus.activeSessions?.length
     ? recordingStatus.activeSessions
     : recordingStatus.activeSession
       ? [recordingStatus.activeSession]
       : [];
-  const selectedSession = selectedSessionId === "live" ? activeSessions[0] : sessions.find((session) => session.sessionId === selectedSessionId);
-  // 종료된 과거 세션을 보고 있을 때만 방송 id 주소로 프레임을 읽는다 — 라이브·진행 중 세션은
-  // 같은 방송을 쓰고 있는 캡처 매니저의 인메모리 인덱스(라이브 주소)가 가장 신선하다.
-  const frameBroadcastId = selectedSessionId !== "live" && !isSelectedSessionActive ? selectedSession?.broadcastId : undefined;
+  // 병합 뷰는 특정 provider 세션이 없다(양쪽 합본). 라이브는 최신 활성 세션, 세션 뷰는 그 세션.
+  const selectedSession =
+    view.kind === "live" ? activeSessions[0] : view.kind === "session" ? sessions.find((session) => session.sessionId === selectedSessionId) : undefined;
+  // 병합은 파싱한 broadcastId로 명시 주입(undefined면 라이브 주소로 새는 버그). 종료된 세션은 그 방송 id.
+  // 라이브·진행 중 세션은 캡처 매니저 인메모리 인덱스(라이브 주소)가 가장 신선하다.
+  const frameBroadcastId =
+    view.kind === "merged" ? view.broadcastId : view.kind === "session" && !isSelectedSessionActive ? selectedSession?.broadcastId : undefined;
   // 세션 탭의 빈 구간(채팅 0)에서 프레임 폴백이 그 세션 provider를 쓰도록 넘긴다 — 라이브(병합) 뷰는
   // 반드시 undefined여야 기존 dominant→chzzk 동작이 보존된다(라이브 가드는 헬퍼가 소유·단위 테스트로 고정).
   const sessionFallbackProvider = resolveSessionFallbackProvider(selectedSessionId, selectedSession?.provider);
+  // 과거 뷰(병합·세션)는 프레임 소스를 anchor(치지직)로 고정 — 라이브는 undefined로 기존 dominant 유지.
+  const framePrimaryProvider = view.kind === "live" ? undefined : ANCHOR_FRAME_PROVIDER;
+  const isMergedActive = view.kind === "merged" && recordingStatus.activeBroadcastId === view.broadcastId;
+  // 싱크 배지 — 라이브는 소켓 상태, 병합은 offset.json(활성이면 미정렬 안내). 세션 탭은 배지 없음.
+  const offsetBadgeView =
+    view.kind === "live"
+      ? liveOffsetBadge(liveOffsetStatus)
+      : view.kind === "merged"
+        ? mergedOffsetBadge(mergedOffset, isMergedActive)
+        : undefined;
 
   useEffect(() => {
     // 5초마다 실제로 캡처된 프레임 초 목록을 가져온다 — 화면(호버/재생 패널)은 이 목록에
@@ -421,7 +489,12 @@ export function DashboardRoute() {
     [sessions, sessionProviderFilter, sessionDateFilter]
   );
   const groups = useMemo(() => groupSessionsByBroadcast(visibleSessions), [visibleSessions]);
-  const selectedGroup = selectedSessionId !== "live" ? findGroupOf(groups, selectedSessionId) : undefined;
+  const selectedGroup =
+    view.kind === "merged"
+      ? groups.find((group) => group.broadcastId === view.broadcastId)
+      : view.kind === "session"
+        ? findGroupOf(groups, selectedSessionId)
+        : undefined;
   // idle 상태(미연결/비활성)는 상단 뱃지에서 숨긴다 — 문제가 있는 provider만 나란히 노출한다.
   const captureBadges = (["chzzk", "soop"] as const)
     .map((provider) => ({ provider, status: frameCaptureStatusByProvider[provider] }))
@@ -661,6 +734,7 @@ export function DashboardRoute() {
                 ))}
               </div>
             )}
+            {offsetBadgeView && <OffsetBadge view={offsetBadgeView} />}
             {selectedSessionId === "live" && (
               <button className="ghost-button compact-button" onClick={resetLive}>
                 <RotateCcw size={16} />
@@ -693,8 +767,9 @@ export function DashboardRoute() {
             />
           </div>
 
-          {selectedSessionId !== "live" && selectedGroup && selectedGroup.sessions.length >= 2 && (
+          {view.kind !== "live" && selectedGroup && selectedGroup.sessions.length >= 2 && (
             <BroadcastTabs
+              broadcastId={selectedGroup.broadcastId}
               selectedSessionId={selectedSessionId}
               sessions={selectedGroup.sessions}
               onSelectSession={setSelectedSessionId}
@@ -773,6 +848,7 @@ export function DashboardRoute() {
             <Timeline
               focusRange={focusRange}
               frameBroadcastId={frameBroadcastId}
+              framePrimaryProvider={framePrimaryProvider}
               frameIndexLoaded={frameIndexLoaded}
               frameSecondsByProvider={frameSecondsByProvider}
               markers={markers}
@@ -827,6 +903,7 @@ export function DashboardRoute() {
           {selectedRange && (
             <FramePlayerPanel
               frameBroadcastId={frameBroadcastId}
+              framePrimaryProvider={framePrimaryProvider}
               frameCaptureStatusByProvider={frameCaptureStatusByProvider}
               frameIndexLoaded={frameIndexLoaded}
               frameSecondsByProvider={frameSecondsByProvider}

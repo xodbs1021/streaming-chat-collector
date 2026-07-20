@@ -335,6 +335,30 @@ describe("chat recorder — 세션 삭제(프레임 연동)", () => {
     await recorder.stopRecording();
     await rm(dir, { recursive: true, force: true });
   });
+
+  it("await 사이 방송이 정지→재시작되면 옛 방송 파일에 뒤늦게 append하지 않는다(레이스 가드)", async () => {
+    const dir = await makeTempDir();
+    const recorder = new ChatRecorder(dir);
+    const broadcast1 = await recorder.startRecording([chzzkRef()]);
+    await recorder.recordMessage(makeMessage({ messageId: "chzzk-1", content: "b1" }));
+    await recorder.flushWrites();
+
+    // recordMessage가 await ensureProviderSession에서 마이크로태스크로 양보하는 사이에
+    // 정지(activeBroadcast=undefined)→재시작(새 방송)을 동기적으로 끼워 넣는다(정지→빠른 재시작 레이스).
+    const pending = recorder.recordMessage(makeMessage({ messageId: "chzzk-2", content: "raced" }));
+    void recorder.stopRecording(); // 동기적으로 activeBroadcast=undefined
+    const broadcast2 = recorder.startRecording([chzzkRef()]); // 동기적으로 activeBroadcast=새 방송
+    await pending;
+    await broadcast2;
+    await recorder.flushWrites();
+
+    // 방송1 파일에는 "raced"가 append되지 않아야 한다(옛 방송은 이미 종료·정렬 대상).
+    const b1Chat = path.join(dir, broadcast1!.broadcastId, "chat", "chzzk", "chat.jsonl");
+    const b1Content = await readFile(b1Chat, "utf8");
+    expect(b1Content).toContain("b1");
+    expect(b1Content).not.toContain("raced");
+    await rm(dir, { recursive: true, force: true });
+  });
 });
 
 async function makeTempDir() {

@@ -16,6 +16,9 @@ import { resolveFrameChannelInput } from "./frameChannel";
 import { getFfmpegReadiness, probeFfmpeg } from "./ffmpegRuntime";
 import { CAPTURE_READY_TIMEOUT_MS, planFromReadiness } from "../shared/captureReadiness";
 import { ChatRecorder } from "./recorder";
+import { LiveOffsetTracker } from "./offset/liveOffsetTracker";
+import { finalizeBroadcastAlignment } from "./offset/finalizeAlignment";
+import { DEFAULT_ESTIMATOR_PARAMS } from "./offset/offsetEstimator";
 import { BroadcastPaths } from "./broadcast/broadcastPaths";
 import { BroadcastFrameReader } from "./broadcast/broadcastFrameReader";
 import { RecordingGrace } from "./broadcast/recordingGrace";
@@ -25,6 +28,7 @@ import { registerAnalyticsRoutes } from "./routes/analytics";
 import { registerAuthRoutes } from "./routes/auth";
 import { registerProviderRoutes } from "./routes/providers";
 import { registerFrameRoutes } from "./routes/frames";
+import { registerBroadcastRoutes } from "./routes/broadcasts";
 import type {
   BroadcastProviderRef,
   ChatMessage,
@@ -72,6 +76,11 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 const liveAnalytics = new LiveAnalytics();
+// offset 싱크 킬스위치(CAPTURE_SYNC 선례) — OFFSET_SYNC=0이면 라이브 무보정·finalize 재작성 생략(현행 동작 복귀).
+const offsetSyncEnabled = process.env.OFFSET_SYNC !== "0";
+// SOOP↔치지직 라이브 offset 추적기(메모리 보정만 — 디스크 기록은 원본). finalize가 파일 정렬 담당.
+// enabled → 꺼지면 배지가 "보정 꺼짐"으로 표시(영구 "계산 중" 오해 방지).
+const liveOffsetTracker = new LiveOffsetTracker({ enabled: offsetSyncEnabled });
 const state = new AppState(io, {
   onMessage: (message) => {
     void handleRecordedMessage(message);
@@ -118,6 +127,23 @@ const liveEmitTimer = setInterval(() => {
 }, LIVE_EMIT_INTERVAL_MS);
 (liveEmitTimer as { unref?: () => void }).unref?.();
 
+// 60초 주기 offset 재추정 — 실시간 경로가 아니라 이 타이머만 무거운 상관 계산을 돈다(불변식: observe는 O(1)).
+const offsetReestimateTimer = setInterval(() => {
+  if (!offsetSyncEnabled) {
+    return;
+  }
+  // 트래커가 채택(retime 동반) 시에만 change를 돌려준다 — 게이트(첫 신뢰|Δ>2초)는 트래커가 소유해
+  // correct()의 applied 축과 retime이 갈라지지 않게 한다.
+  const change = liveOffsetTracker.reestimate();
+  if (change) {
+    liveAnalytics.retimeProvider("soop", change.deltaMs);
+    // retime은 과거 버킷을 통째로 바꾸므로, partial 병합이 스테일 버킷을 남기지 않게 전체 summary를 1회 강제 방출.
+    io.emit("analytics:live", liveAnalytics.getSummary(recorder.getActiveSession()));
+  }
+  io.emit("offset:live", liveOffsetTracker.getStatus());
+}, DEFAULT_ESTIMATOR_PARAMS.reestimateSec * 1000);
+(offsetReestimateTimer as { unref?: () => void }).unref?.();
+
 const distPath = path.resolve(process.cwd(), "dist");
 
 await app.register(fastifyStatic, {
@@ -157,10 +183,20 @@ app.post<{ Body: Partial<OverlaySettings> }>("/api/settings", async (request) =>
   return applySettingsPatch(request.body ?? {});
 });
 
-registerAnalyticsRoutes(app, { recorder, liveAnalytics, io });
+registerAnalyticsRoutes(app, {
+  recorder,
+  liveAnalytics,
+  io,
+  onLiveReset: () => {
+    liveOffsetTracker.reset();
+    // 배지 스테일 해소 — 리셋 즉시 새 상태(estimating)를 방출한다.
+    io.emit("offset:live", liveOffsetTracker.getStatus());
+  }
+});
 registerProviderRoutes(app, { state, providerLogs, connectProvider, disconnectProvider });
 registerAuthRoutes(app, { state, getChzzkToken, setChzzkToken });
 registerFrameRoutes(app, { frameManagers: frameCaptureManagers, frameReader });
+registerBroadcastRoutes(app, { recorder, paths: broadcastPaths });
 
 // SPA 폴백 — 정적 파일과 겹치지 않는 경로(관리 화면 등 클라이언트 라우트)만 여기로 들어온다.
 // 매번 서버 재시작 없이 최신 빌드 파일을 반영하려면 정적 플러그인이 자체 와일드카드로
@@ -171,6 +207,7 @@ io.on("connection", (socket) => {
   state.hydrateSocket(socket.id);
   socket.emit("recording:status", recorder.getStatus());
   socket.emit("analytics:live", liveAnalytics.getSummary(recorder.getActiveSession()));
+  socket.emit("offset:live", liveOffsetTracker.getStatus());
 
   socket.on("settings:update", (patch) => {
     applySettingsPatch(patch);
@@ -215,7 +252,15 @@ async function handleRecordedMessage(message: ChatMessage) {
       return;
     }
 
-    liveAnalytics.append(record);
+    // 라이브 표시만 보정한다 — 디스크 기록(recordMessage)은 이미 원본 그대로 저장됐다.
+    // observe는 원본 시각으로(재추정 입력), append는 SOOP만 anchor 축으로 옮긴 표시용 시각으로.
+    if (offsetSyncEnabled) {
+      liveOffsetTracker.observe(record.provider, record.timestamp);
+      const displayTimestamp = liveOffsetTracker.correct(record.provider, record.timestamp);
+      liveAnalytics.append(displayTimestamp === record.timestamp ? record : { ...record, timestamp: displayTimestamp });
+    } else {
+      liveAnalytics.append(record);
+    }
     analyticsDirty = true;
     if (recorder.isRecording()) {
       recordingStatusDirty = true;
@@ -243,6 +288,10 @@ async function startRecording() {
     return;
   }
   recordingGrace.cancel();
+  // offset은 방송 단위 스코프 — 새 방송은 웜업부터 다시 시작한다(옛 방송의 축을 이어쓰지 않음).
+  if (offsetSyncEnabled) {
+    liveOffsetTracker.reset();
+  }
   const broadcast = await recorder.startRecording(providers);
   if (broadcast) {
     appendProviderLog({
@@ -270,6 +319,12 @@ async function finalizeRecording(message: string) {
   if (ended) {
     // 녹화 종료 = 캡처 종료 (연결과 무관, start↔stop 대칭) [Q2=A]. 비참여 매니저는 이미 stopped라 멱등.
     await Promise.all(Object.values(frameCaptureManagers).map((manager) => manager.stop()));
+    // 방송 전체 채팅으로 SOOP 파일을 anchor 축으로 일괄 정렬하고 offset.json 마커를 남긴다(킬스위치 off면 생략).
+    if (offsetSyncEnabled) {
+      await finalizeBroadcastAlignment(ended.broadcastId, { paths: broadcastPaths }).catch((error) =>
+        app.log.error(error, "방송 종료 후 offset 정렬에 실패했습니다.")
+      );
+    }
     appendProviderLog({ provider: ended.providers[0]?.provider ?? "chzzk", level: "info", message });
     emitRecordingStatus();
   }
