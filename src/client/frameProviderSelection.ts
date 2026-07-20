@@ -4,6 +4,12 @@ import type { AnalyticsWindow, ChatProvider } from "../shared/types";
 const PROVIDER_ORDER: ChatProvider[] = ["chzzk", "soop"];
 const FRAME_MATCH_TOLERANCE_SEC = 15;
 
+/** dominant도 세션 provider도 없을 때(라이브 병합 뷰의 빈 구간) 마지막으로 기대는 플랫폼 */
+export const DEFAULT_PROVIDER: ChatProvider = "chzzk";
+
+/** 세션 선택 상태에서 라이브(여러 방송 병합) 뷰를 가리키는 센티넬 id */
+const LIVE_SESSION_ID = "live";
+
 /** providerCounts 중 채팅량이 더 많은 플랫폼을 고른다. 동률이면 치지직 우선, 둘 다 0이면 undefined */
 export function dominantProvider(counts: Partial<Record<ChatProvider, number>>): ChatProvider | undefined {
   let best: ChatProvider | undefined;
@@ -16,6 +22,31 @@ export function dominantProvider(counts: Partial<Record<ChatProvider, number>>):
     }
   }
   return best;
+}
+
+/**
+ * 이 윈도우/구간에서 프레임을 보여줄 primary 플랫폼을 정한다.
+ * 채팅이 있으면 채팅량이 많은 쪽(dominant), 채팅이 없던 빈 구간이면 그 세션의 provider,
+ * 세션도 없는 라이브 병합 뷰면 DEFAULT_PROVIDER. 하드코딩 chzzk 폴백을 문맥 인지형으로 대체한다.
+ */
+export function resolvePrimaryProvider(
+  counts: Partial<Record<ChatProvider, number>>,
+  sessionProvider?: ChatProvider
+): ChatProvider {
+  return dominantProvider(counts) ?? sessionProvider ?? DEFAULT_PROVIDER;
+}
+
+/**
+ * 세션 탭의 채팅 없는 빈 구간에서 프레임 폴백에 쓸 provider를 정한다.
+ * 라이브(병합) 뷰(selectedSessionId === "live")면 undefined를 돌려 기존 dominant→chzzk 폴백을 그대로 두고,
+ * 특정 세션 탭이면 그 세션의 provider를 폴백으로 넘긴다(provider를 모르면 undefined 그대로).
+ * 라이브에서 특정 provider를 넘기면 병합 뷰의 폴백 동작이 깨지므로 undefined 유지가 불변식이다.
+ */
+export function resolveSessionFallbackProvider(
+  selectedSessionId: string,
+  selectedSessionProvider: ChatProvider | undefined
+): ChatProvider | undefined {
+  return selectedSessionId === LIVE_SESSION_ID ? undefined : selectedSessionProvider;
 }
 
 /** 두 플랫폼 중 주어진 것의 반대쪽 — 프레임 폴백 순서를 정할 때 쓴다 */

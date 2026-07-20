@@ -2,7 +2,7 @@ import { Eye } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { AnalyticsWindow, ChatProvider } from "../../../shared/types";
 import type { FrameCaptureStatus } from "../../../shared/frameCaptureStatus";
-import { dominantProvider, filterAvailableSeconds, otherProvider, resolveAvailableFrames, sumProviderCounts } from "../../frameProviderSelection";
+import { filterAvailableSeconds, otherProvider, resolveAvailableFrames, resolvePrimaryProvider, sumProviderCounts } from "../../frameProviderSelection";
 import { FRAME_PLAYBACK_INTERVAL_MS, PROVIDER_LABEL, type TimelineSelection } from "./constants";
 import { formatFrameTimestamp, formatTime, frameSecondsForRange } from "./format";
 import { FramePreview } from "./FramePreview";
@@ -14,7 +14,8 @@ export function FramePlayerPanel({
   frameBroadcastId,
   frameSecondsByProvider,
   frameCaptureStatusByProvider,
-  frameIndexLoaded
+  frameIndexLoaded,
+  sessionProvider
 }: {
   range: TimelineSelection;
   windows: AnalyticsWindow[];
@@ -23,6 +24,8 @@ export function FramePlayerPanel({
   frameSecondsByProvider: Partial<Record<ChatProvider, number[]>>;
   frameCaptureStatusByProvider?: Partial<Record<ChatProvider, FrameCaptureStatus>>;
   frameIndexLoaded: boolean;
+  /** 세션 탭이면 그 세션의 provider — 채팅 없는 빈 구간의 프레임 폴백에 쓴다(라이브는 undefined). */
+  sessionProvider?: ChatProvider;
 }) {
   const [frameIndex, setFrameIndex] = useState(0);
   const [manualProvider, setManualProvider] = useState<ChatProvider | undefined>();
@@ -32,7 +35,7 @@ export function FramePlayerPanel({
     [windows, range.startAt, range.endAt]
   );
   const rangeCounts = useMemo(() => sumProviderCounts(rangeWindows), [rangeWindows]);
-  const dominant = dominantProvider(rangeCounts) ?? "chzzk";
+  const dominant = resolvePrimaryProvider(rangeCounts, sessionProvider);
 
   // 실제 캡처된 프레임만 남긴다 — 인덱스를 아직 못 받았으면(초기 로드) 옛 방식(이론상 초 전부)으로 우선 표시.
   // 사용자가 탭으로 플랫폼을 직접 골랐으면 그 선택을 그대로 존중하고(자동 폴백 없음), 안 골랐으면

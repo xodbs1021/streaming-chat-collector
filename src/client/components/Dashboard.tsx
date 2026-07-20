@@ -15,6 +15,7 @@ import type {
   WindowComparisonSummary
 } from "../../shared/types";
 import { fetchFrameCaptureStatus, fetchFrameSeconds } from "../frameIndexClient";
+import { resolveSessionFallbackProvider } from "../frameProviderSelection";
 import type { FrameCaptureStatus } from "../../shared/frameCaptureStatus";
 import { socket } from "../socket";
 import { fetchJson } from "./dashboard/api";
@@ -361,6 +362,9 @@ export function DashboardRoute() {
   // 종료된 과거 세션을 보고 있을 때만 방송 id 주소로 프레임을 읽는다 — 라이브·진행 중 세션은
   // 같은 방송을 쓰고 있는 캡처 매니저의 인메모리 인덱스(라이브 주소)가 가장 신선하다.
   const frameBroadcastId = selectedSessionId !== "live" && !isSelectedSessionActive ? selectedSession?.broadcastId : undefined;
+  // 세션 탭의 빈 구간(채팅 0)에서 프레임 폴백이 그 세션 provider를 쓰도록 넘긴다 — 라이브(병합) 뷰는
+  // 반드시 undefined여야 기존 dominant→chzzk 동작이 보존된다(라이브 가드는 헬퍼가 소유·단위 테스트로 고정).
+  const sessionFallbackProvider = resolveSessionFallbackProvider(selectedSessionId, selectedSession?.provider);
 
   useEffect(() => {
     // 5초마다 실제로 캡처된 프레임 초 목록을 가져온다 — 화면(호버/재생 패널)은 이 목록에
@@ -739,6 +743,7 @@ export function DashboardRoute() {
               markers={markers}
               participationRate={summary.participationRate}
               selection={selectedRange}
+              sessionProvider={sessionFallbackProvider}
               thresholds={highlightSummary.thresholds}
               windows={summary.windows}
               windowSec={windowSec}
@@ -791,6 +796,7 @@ export function DashboardRoute() {
               frameIndexLoaded={frameIndexLoaded}
               frameSecondsByProvider={frameSecondsByProvider}
               range={selectedRange}
+              sessionProvider={sessionFallbackProvider}
               windows={summary.windows}
             />
           )}

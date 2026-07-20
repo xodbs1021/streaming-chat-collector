@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { dominantProvider, filterAvailableSeconds, otherProvider, resolveAvailableFrames, sumProviderCounts } from "../src/client/frameProviderSelection";
+import {
+  dominantProvider,
+  filterAvailableSeconds,
+  otherProvider,
+  resolveAvailableFrames,
+  resolvePrimaryProvider,
+  resolveSessionFallbackProvider,
+  sumProviderCounts
+} from "../src/client/frameProviderSelection";
 
 describe("dominantProvider", () => {
   it("picks chzzk when it has more messages", () => {
@@ -21,6 +29,42 @@ describe("dominantProvider", () => {
 
   it("handles a single populated provider", () => {
     expect(dominantProvider({ soop: 4 })).toBe("soop");
+  });
+});
+
+describe("resolvePrimaryProvider", () => {
+  it("returns the dominant provider when counts have messages", () => {
+    expect(resolvePrimaryProvider({ chzzk: 10, soop: 3 }, "soop")).toBe("chzzk");
+  });
+
+  it("falls back to the session provider when counts are empty (the SOOP session regression)", () => {
+    expect(resolvePrimaryProvider({}, "soop")).toBe("soop");
+    expect(resolvePrimaryProvider({ chzzk: 0, soop: 0 }, "soop")).toBe("soop");
+  });
+
+  it("falls back to chzzk when counts are empty and no session provider (live merged view)", () => {
+    expect(resolvePrimaryProvider({})).toBe("chzzk");
+    expect(resolvePrimaryProvider({ chzzk: 0, soop: 0 }, undefined)).toBe("chzzk");
+  });
+
+  it("prefers the dominant provider over the session provider when counts exist", () => {
+    expect(resolvePrimaryProvider({ soop: 5 }, "chzzk")).toBe("soop");
+  });
+});
+
+describe("resolveSessionFallbackProvider", () => {
+  it("returns undefined for the live merged view so its dominant→chzzk fallback stays intact", () => {
+    expect(resolveSessionFallbackProvider("live", "soop")).toBeUndefined();
+    expect(resolveSessionFallbackProvider("live", undefined)).toBeUndefined();
+  });
+
+  it("returns the session provider for a session tab (its empty-window frame fallback uses it)", () => {
+    expect(resolveSessionFallbackProvider("session-123", "soop")).toBe("soop");
+    expect(resolveSessionFallbackProvider("session-abc", "chzzk")).toBe("chzzk");
+  });
+
+  it("returns undefined for a session tab whose provider is unknown", () => {
+    expect(resolveSessionFallbackProvider("session-123", undefined)).toBeUndefined();
   });
 });
 
