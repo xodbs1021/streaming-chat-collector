@@ -13,7 +13,13 @@ import { SoopUnofficialAdapter } from "./providers/soopUnofficial";
 import { classifyProviderFailureReason } from "./providerDiagnostics";
 import { FrameCaptureManager, fetchChzzkHlsUrl, fetchSoopHlsUrl } from "./frameCapture";
 import { resolveFrameChannelInput } from "./frameChannel";
-import { runSingleFrameCapture, shouldCaptureLateJoin, type SingleFrameCaptureDeps } from "./captureSource";
+import {
+  captureSlotOwns,
+  runSingleFrameCapture,
+  shouldCaptureLateJoin,
+  type CaptureSlot,
+  type SingleFrameCaptureDeps
+} from "./captureSource";
 import { getFfmpegReadiness, probeFfmpeg } from "./ffmpegRuntime";
 import { CAPTURE_READY_TIMEOUT_MS, planFromReadiness, type CaptureReadiness } from "../shared/captureReadiness";
 import { ChatRecorder } from "./recorder";
@@ -101,8 +107,9 @@ const connectSeq: Record<ChatProvider, number> = { chzzk: 0, soop: 0 };
 const captureSyncEnabled = process.env.CAPTURE_SYNC !== "0";
 // 단일 소스 프레임 캡처 킬스위치 — SINGLE_FRAME_CAPTURE=0이면 슬롯 시맨틱 전체 비활성(레거시 이중 캡처 복원).
 const singleFrameCaptureEnabled = process.env.SINGLE_FRAME_CAPTURE !== "0";
-// 이 방송이 프레임을 캡처 중인 단일 소스(슬롯). 기동 호출 직전 set·finalize에서 리셋. 레거시 모드는 세팅하지 않는다.
-let activeCaptureProvider: ChatProvider | undefined;
+// 프레임을 캡처 중인 단일 소스 슬롯 — { broadcastId, provider }로 방송 스코프. 기동 호출 직전 set,
+// finalize에서 그 방송 소유일 때만 리셋. 레거시 모드는 세팅하지 않는다(항상 undefined).
+let captureSlot: CaptureSlot | undefined;
 const providerLogs: ProviderDiagnosticLog[] = [];
 const chzzkTokenPath = path.resolve(process.cwd(), config.chatDataDir, ".chzzk-token.json");
 let chzzkToken: ChzzkTokenSet | undefined = await readStoredChzzkToken(chzzkTokenPath);
@@ -310,24 +317,33 @@ async function startRecording() {
     // 기능적으로 게이팅하지 않고(이미 시작됨) 준비 상태 메시지 UX만 구동한다 [R1].
     if (singleFrameCaptureEnabled) {
       // 단일 소스: 치지직 우선 기동, 스트림 불가 시 SOOP 대체. 슬롯은 오케스트레이터가 기동 직전 set한다.
-      void runSingleFrameCapture(providers, singleFrameCaptureDeps(broadcast.broadcastId));
+      void runSingleFrameCapture(providers, singleFrameCaptureDeps(broadcast.broadcastId)).catch((error) =>
+        app.log.error(error, "단일 소스 캡처 기동 중 오류가 발생했습니다.")
+      );
     } else {
       // 킬스위치 off: 슬롯 미세팅 + 레거시 이중 캡처(참여 provider 전부 동시 기동).
-      void Promise.all(providers.map((ref) => ensureCaptureForRecording(ref, broadcast.broadcastId)));
+      void Promise.all(providers.map((ref) => ensureCaptureForRecording(ref, broadcast.broadcastId))).catch((error) =>
+        app.log.error(error, "레거시 이중 캡처 기동 중 오류가 발생했습니다.")
+      );
     }
   }
 }
 
-/** runSingleFrameCapture에 넘길 런타임 부작용 계약 — broadcastId를 클로저로 고정한다. */
-function singleFrameCaptureDeps(broadcastId: string | undefined): SingleFrameCaptureDeps {
+/**
+ * runSingleFrameCapture에 넘길 런타임 부작용 계약 — 이 방송(broadcastId)을 스코프로 고정한다.
+ * 슬롯 minting·소유권 재확인이 모두 이 broadcastId 기준이라, 대기 중 다음 방송이 시작돼도 서로 침범하지 않는다.
+ */
+function singleFrameCaptureDeps(broadcastId: string): SingleFrameCaptureDeps {
   return {
-    setActiveProvider: (provider) => {
-      activeCaptureProvider = provider;
+    broadcastId,
+    setSlot: (slot) => {
+      captureSlot = slot;
     },
     ensureCapture: (ref) => ensureCaptureForRecording(ref, broadcastId),
     // 폴백은 raw start 대신 ensureCaptureForRecording를 재사용한다 — stop은 직접(멱등).
     stopChzzkCapture: () => frameCaptureManagers.chzzk.stop(),
-    soopRefIfConnected: () => connectedProviderRefs().find((ref) => ref.provider === "soop")
+    soopRefIfConnected: () => connectedProviderRefs().find((ref) => ref.provider === "soop"),
+    isActiveBroadcast: () => recorder.getActiveBroadcastId() === broadcastId
   };
 }
 
@@ -343,8 +359,11 @@ async function finalizeRecording(message: string) {
   if (ended) {
     // 녹화 종료 = 캡처 종료 (연결과 무관, start↔stop 대칭) [Q2=A]. 비참여 매니저는 이미 stopped라 멱등.
     await Promise.all(Object.values(frameCaptureManagers).map((manager) => manager.stop()));
-    // 캡처 슬롯 리셋 — 다음 방송이 스테일 슬롯을 물려받아 late-join을 잘못 차단하지 않게 한다(리스크: 스테일 슬롯).
-    activeCaptureProvider = undefined;
+    // 캡처 슬롯 리셋 — 이 방송이 소유한 슬롯일 때만. stop await 사이 다음 방송이 세팅한 슬롯을
+    // 지워 late-join 이중 캡처를 열지 않게 한다(방송 스코프 소유권 검사).
+    if (captureSlotOwns(captureSlot, ended.broadcastId)) {
+      captureSlot = undefined;
+    }
     // 방송 전체 채팅으로 SOOP 파일을 anchor 축으로 일괄 정렬하고 offset.json 마커를 남긴다(킬스위치 off면 생략).
     if (offsetSyncEnabled) {
       await finalizeBroadcastAlignment(ended.broadcastId, { paths: broadcastPaths }).catch((error) =>
@@ -495,9 +514,14 @@ async function ensureCaptureForRecording(
   // 연결 표시는 유지한 채 message만 "이미지 준비 중..."으로 — provider는 이미 connected다(강등 금지) [R2].
   const prev = state.getStatus(provider);
   state.setStatus({ ...prev, message: "이미지 준비 중..." });
-  const readiness = await manager.waitUntilReady(CAPTURE_READY_TIMEOUT_MS, () => !recorder.isRecording());
-  // 대기 중 녹화가 끝났으면(더블클릭 record→stop 등) 선기동한 캡처는 고아 — 정리하고 상태는 손대지 않는다 [R3].
-  if (!recorder.isRecording()) {
+  // 대기 중 이 방송이 끝나면(수동 stop·자동종료·다음 방송 시작) 취소한다 — isRecording()이 아니라 방송 동일성으로
+  // 판정해야, 대기 중 다음 방송이 시작된 경우(isRecording=true, 다른 broadcastId)에도 이 캡처를 고아로 본다.
+  const readiness = await manager.waitUntilReady(
+    CAPTURE_READY_TIMEOUT_MS,
+    () => recorder.getActiveBroadcastId() !== broadcastId
+  );
+  // 대기 중 이 방송이 끝났으면 선기동한 캡처는 고아 — 정리하고(다음 방송 디렉토리 미침범) 상태는 손대지 않는다 [R3].
+  if (recorder.getActiveBroadcastId() !== broadcastId) {
     await manager.stop();
     return "cancelled";
   }
@@ -571,17 +595,18 @@ async function connectProvider(request: ConnectProviderRequest) {
         channelId: adapter.getStatus().channelId ?? request.channelId,
         message: "채팅 소스 연결이 완료되었습니다."
       });
-      // 녹화 중 뒤늦게 붙은 provider의 캡처 합류 — 단일 소스 모드에선 슬롯이 비어 있을 때만(시작 시 캡처 가능한
-      // provider가 0이었던 경우). 슬롯을 먼저 채우고 기동해 다음 late-join이 이중 기동되지 않게 한다.
-      // (레거시 모드는 슬롯을 세팅하지 않아 항상 비어 있음 → 기존 이중 캡처 그대로.)
-      if (shouldCaptureLateJoin(recorder.isRecording(), activeCaptureProvider)) {
-        if (singleFrameCaptureEnabled) {
-          activeCaptureProvider = provider;
+      // 녹화 중 뒤늦게 붙은 provider의 캡처 합류 — 단일 소스 모드에선 현재 방송을 소유한 슬롯이 없을 때만
+      // (시작 시 캡처 가능한 provider가 0이었던 경우). 슬롯을 이 방송 스코프로 먼저 채우고 기동해
+      // 다음 late-join이 이중 기동되지 않게 한다. (레거시 모드는 슬롯을 세팅하지 않아 항상 미소유 → 기존 이중 캡처.)
+      const activeBroadcastId = recorder.getActiveBroadcastId();
+      if (shouldCaptureLateJoin(recorder.isRecording(), captureSlot, activeBroadcastId)) {
+        if (singleFrameCaptureEnabled && activeBroadcastId) {
+          captureSlot = { broadcastId: activeBroadcastId, provider };
         }
         void ensureCaptureForRecording(
           { provider, sourceMode: request.sourceMode, channelId: adapter.getStatus().channelId ?? request.channelId ?? "" },
-          recorder.getActiveBroadcastId()
-        );
+          activeBroadcastId
+        ).catch((error) => app.log.error(error, "late-join 캡처 기동 중 오류가 발생했습니다."));
       }
     }
     return { ok: !isFailureState, providerStatus: adapter.getStatus(), providerStatuses: state.getStatuses() };
