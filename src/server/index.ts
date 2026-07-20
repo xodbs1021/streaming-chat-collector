@@ -16,6 +16,9 @@ import { resolveFrameChannelInput } from "./frameChannel";
 import { getFfmpegReadiness, probeFfmpeg } from "./ffmpegRuntime";
 import { CAPTURE_READY_TIMEOUT_MS, planFromReadiness } from "../shared/captureReadiness";
 import { ChatRecorder } from "./recorder";
+import { LiveOffsetTracker } from "./offset/liveOffsetTracker";
+import { finalizeBroadcastAlignment } from "./offset/finalizeAlignment";
+import { DEFAULT_ESTIMATOR_PARAMS } from "./offset/offsetEstimator";
 import { BroadcastPaths } from "./broadcast/broadcastPaths";
 import { BroadcastFrameReader } from "./broadcast/broadcastFrameReader";
 import { RecordingGrace } from "./broadcast/recordingGrace";
@@ -72,6 +75,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 const liveAnalytics = new LiveAnalytics();
+// SOOP↔치지직 라이브 offset 추적기(메모리 보정만 — 디스크 기록은 원본). finalize가 파일 정렬 담당.
+const liveOffsetTracker = new LiveOffsetTracker();
 const state = new AppState(io, {
   onMessage: (message) => {
     void handleRecordedMessage(message);
@@ -89,6 +94,10 @@ const currentAdapters = new Map<ChatProvider, ProviderAdapter>();
 const connectSeq: Record<ChatProvider, number> = { chzzk: 0, soop: 0 };
 // 캡처 선기동 동기화 킬스위치 — CAPTURE_SYNC=0이면 구 fire-and-forget 동작(채팅 먼저, 캡처 백그라운드)으로 폴백.
 const captureSyncEnabled = process.env.CAPTURE_SYNC !== "0";
+// offset 싱크 킬스위치(CAPTURE_SYNC 선례) — OFFSET_SYNC=0이면 라이브 무보정·finalize 재작성 생략(현행 동작 복귀).
+const offsetSyncEnabled = process.env.OFFSET_SYNC !== "0";
+// retime 게이트 — 웜업 종료(첫 신뢰) 시 1회, 이후 offset 변화가 이 임계를 넘을 때만 과거 append분을 재배치.
+const RETIME_MIN_DELTA_MS = 2_000;
 const providerLogs: ProviderDiagnosticLog[] = [];
 const chzzkTokenPath = path.resolve(process.cwd(), config.chatDataDir, ".chzzk-token.json");
 let chzzkToken: ChzzkTokenSet | undefined = await readStoredChzzkToken(chzzkTokenPath);
@@ -117,6 +126,25 @@ const liveEmitTimer = setInterval(() => {
   }
 }, LIVE_EMIT_INTERVAL_MS);
 (liveEmitTimer as { unref?: () => void }).unref?.();
+
+// 60초 주기 offset 재추정 — 실시간 경로가 아니라 이 타이머만 무거운 상관 계산을 돈다(불변식: observe는 O(1)).
+const offsetReestimateTimer = setInterval(() => {
+  if (!offsetSyncEnabled) {
+    return;
+  }
+  const change = liveOffsetTracker.reestimate();
+  if (!change) {
+    return;
+  }
+  // 웜업 종료(첫 신뢰) 시 1회, 이후 |delta|>2초일 때만 과거 SOOP append분을 새 축으로 재배치한다.
+  if (change.firstConfident || Math.abs(change.deltaMs) > RETIME_MIN_DELTA_MS) {
+    liveAnalytics.retimeProvider("soop", change.deltaMs);
+    // retime은 과거 버킷을 통째로 바꾸므로, partial 병합이 스테일 버킷을 남기지 않게 전체 summary를 1회 강제 방출.
+    io.emit("analytics:live", liveAnalytics.getSummary(recorder.getActiveSession()));
+  }
+  io.emit("offset:live", liveOffsetTracker.getStatus());
+}, DEFAULT_ESTIMATOR_PARAMS.reestimateSec * 1000);
+(offsetReestimateTimer as { unref?: () => void }).unref?.();
 
 const distPath = path.resolve(process.cwd(), "dist");
 
@@ -157,7 +185,7 @@ app.post<{ Body: Partial<OverlaySettings> }>("/api/settings", async (request) =>
   return applySettingsPatch(request.body ?? {});
 });
 
-registerAnalyticsRoutes(app, { recorder, liveAnalytics, io });
+registerAnalyticsRoutes(app, { recorder, liveAnalytics, io, onLiveReset: () => liveOffsetTracker.reset() });
 registerProviderRoutes(app, { state, providerLogs, connectProvider, disconnectProvider });
 registerAuthRoutes(app, { state, getChzzkToken, setChzzkToken });
 registerFrameRoutes(app, { frameManagers: frameCaptureManagers, frameReader });
@@ -171,6 +199,7 @@ io.on("connection", (socket) => {
   state.hydrateSocket(socket.id);
   socket.emit("recording:status", recorder.getStatus());
   socket.emit("analytics:live", liveAnalytics.getSummary(recorder.getActiveSession()));
+  socket.emit("offset:live", liveOffsetTracker.getStatus());
 
   socket.on("settings:update", (patch) => {
     applySettingsPatch(patch);
@@ -215,7 +244,15 @@ async function handleRecordedMessage(message: ChatMessage) {
       return;
     }
 
-    liveAnalytics.append(record);
+    // 라이브 표시만 보정한다 — 디스크 기록(recordMessage)은 이미 원본 그대로 저장됐다.
+    // observe는 원본 시각으로(재추정 입력), append는 SOOP만 anchor 축으로 옮긴 표시용 시각으로.
+    if (offsetSyncEnabled) {
+      liveOffsetTracker.observe(record.provider, record.timestamp);
+      const displayTimestamp = liveOffsetTracker.correct(record.provider, record.timestamp);
+      liveAnalytics.append(displayTimestamp === record.timestamp ? record : { ...record, timestamp: displayTimestamp });
+    } else {
+      liveAnalytics.append(record);
+    }
     analyticsDirty = true;
     if (recorder.isRecording()) {
       recordingStatusDirty = true;
@@ -270,6 +307,12 @@ async function finalizeRecording(message: string) {
   if (ended) {
     // 녹화 종료 = 캡처 종료 (연결과 무관, start↔stop 대칭) [Q2=A]. 비참여 매니저는 이미 stopped라 멱등.
     await Promise.all(Object.values(frameCaptureManagers).map((manager) => manager.stop()));
+    // 방송 전체 채팅으로 SOOP 파일을 anchor 축으로 일괄 정렬하고 offset.json 마커를 남긴다(킬스위치 off면 생략).
+    if (offsetSyncEnabled) {
+      await finalizeBroadcastAlignment(ended.broadcastId, { paths: broadcastPaths }).catch((error) =>
+        app.log.error(error, "방송 종료 후 offset 정렬에 실패했습니다.")
+      );
+    }
     appendProviderLog({ provider: ended.providers[0]?.provider ?? "chzzk", level: "info", message });
     emitRecordingStatus();
   }

@@ -14,8 +14,9 @@ export const DEFAULT_ESTIMATOR_PARAMS: OffsetEstimatorParams = {
   reestimateSec: 60
 };
 
-/** 신뢰 판정 임계 — 이 값 미만이면 그 구간은 carry(추정치) 처리. */
-const MIN_CONFIDENCE = 0.1;
+/** 신뢰 판정 임계 — 이 값 미만이면 그 구간은 carry(추정치) 처리. 라이브 트래커도 공유. */
+export const CONFIDENT_THRESHOLD = 0.1;
+const MIN_CONFIDENCE = CONFIDENT_THRESHOLD;
 /** 구간이 "조용하지 않다"고 보는 최소 이벤트 수(양 provider 각각). */
 const MIN_EVENTS_PER_WINDOW = 5;
 /** runner-up을 셀 때 피크 주변을 배제하는 가드(초) — 피크 자신의 어깨를 runner-up으로 오인하지 않도록. */

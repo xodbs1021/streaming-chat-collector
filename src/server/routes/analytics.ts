@@ -21,6 +21,8 @@ interface AnalyticsRouteDeps {
   recorder: ChatRecorder;
   liveAnalytics: LiveAnalytics;
   io: AppSocketServer;
+  /** 라이브 초기화 시 함께 리셋할 부수 상태(예: offset 트래커) — 라이브 분석과 같은 수명주기를 공유한다. */
+  onLiveReset?: () => void;
 }
 
 const LIVE_COMPARISON_CACHE_MS = 5_000;
@@ -35,7 +37,7 @@ const highlightCategories = new Set<HighlightCategory>([
 ]);
 
 export function registerAnalyticsRoutes(app: FastifyInstance, deps: AnalyticsRouteDeps) {
-  const { recorder, liveAnalytics, io } = deps;
+  const { recorder, liveAnalytics, io, onLiveReset } = deps;
   let liveComparisonCache: { generatedAt: number; payload: WindowComparisonSummary } | undefined;
 
   app.get("/api/analytics/sessions", async () => recorder.listSessions());
@@ -300,6 +302,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, deps: AnalyticsRou
 
   app.post<{ Querystring: { windowSec?: string } }>("/api/analytics/live/reset", async (request) => {
     liveAnalytics.reset();
+    onLiveReset?.();
     liveComparisonCache = undefined;
     const summary = liveAnalytics.getSummary(recorder.getActiveSession(), readWindowSec(request.query.windowSec));
     io.emit("analytics:live", summary);
