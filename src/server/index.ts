@@ -13,8 +13,9 @@ import { SoopUnofficialAdapter } from "./providers/soopUnofficial";
 import { classifyProviderFailureReason } from "./providerDiagnostics";
 import { FrameCaptureManager, fetchChzzkHlsUrl, fetchSoopHlsUrl } from "./frameCapture";
 import { resolveFrameChannelInput } from "./frameChannel";
+import { runSingleFrameCapture, shouldCaptureLateJoin, type SingleFrameCaptureDeps } from "./captureSource";
 import { getFfmpegReadiness, probeFfmpeg } from "./ffmpegRuntime";
-import { CAPTURE_READY_TIMEOUT_MS, planFromReadiness } from "../shared/captureReadiness";
+import { CAPTURE_READY_TIMEOUT_MS, planFromReadiness, type CaptureReadiness } from "../shared/captureReadiness";
 import { ChatRecorder } from "./recorder";
 import { LiveOffsetTracker } from "./offset/liveOffsetTracker";
 import { finalizeBroadcastAlignment } from "./offset/finalizeAlignment";
@@ -98,6 +99,10 @@ const currentAdapters = new Map<ChatProvider, ProviderAdapter>();
 const connectSeq: Record<ChatProvider, number> = { chzzk: 0, soop: 0 };
 // 캡처 선기동 동기화 킬스위치 — CAPTURE_SYNC=0이면 구 fire-and-forget 동작(채팅 먼저, 캡처 백그라운드)으로 폴백.
 const captureSyncEnabled = process.env.CAPTURE_SYNC !== "0";
+// 단일 소스 프레임 캡처 킬스위치 — SINGLE_FRAME_CAPTURE=0이면 슬롯 시맨틱 전체 비활성(레거시 이중 캡처 복원).
+const singleFrameCaptureEnabled = process.env.SINGLE_FRAME_CAPTURE !== "0";
+// 이 방송이 프레임을 캡처 중인 단일 소스(슬롯). 기동 호출 직전 set·finalize에서 리셋. 레거시 모드는 세팅하지 않는다.
+let activeCaptureProvider: ChatProvider | undefined;
 const providerLogs: ProviderDiagnosticLog[] = [];
 const chzzkTokenPath = path.resolve(process.cwd(), config.chatDataDir, ".chzzk-token.json");
 let chzzkToken: ChzzkTokenSet | undefined = await readStoredChzzkToken(chzzkTokenPath);
@@ -301,10 +306,29 @@ async function startRecording() {
     });
     // 녹화 상태를 먼저 즉시 방출한다 — 캡처 준비 대기(최대 15초) 뒤로 밀지 않는다 [R1].
     emitRecordingStatus();
-    // 참여 provider별 캡처를 방송 폴더로 기동한다. fire-and-forget — 캡처 준비는 녹화·채팅을
-    // 기능적으로 게이팅하지 않고(이미 시작됨) 준비 상태 메시지 UX만 구동한다.
-    void Promise.all(providers.map((ref) => ensureCaptureForRecording(ref, broadcast.broadcastId)));
+    // 프레임 캡처를 방송 폴더로 기동한다. fire-and-forget — 캡처 준비는 녹화·채팅을
+    // 기능적으로 게이팅하지 않고(이미 시작됨) 준비 상태 메시지 UX만 구동한다 [R1].
+    if (singleFrameCaptureEnabled) {
+      // 단일 소스: 치지직 우선 기동, 스트림 불가 시 SOOP 대체. 슬롯은 오케스트레이터가 기동 직전 set한다.
+      void runSingleFrameCapture(providers, singleFrameCaptureDeps(broadcast.broadcastId));
+    } else {
+      // 킬스위치 off: 슬롯 미세팅 + 레거시 이중 캡처(참여 provider 전부 동시 기동).
+      void Promise.all(providers.map((ref) => ensureCaptureForRecording(ref, broadcast.broadcastId)));
+    }
   }
+}
+
+/** runSingleFrameCapture에 넘길 런타임 부작용 계약 — broadcastId를 클로저로 고정한다. */
+function singleFrameCaptureDeps(broadcastId: string | undefined): SingleFrameCaptureDeps {
+  return {
+    setActiveProvider: (provider) => {
+      activeCaptureProvider = provider;
+    },
+    ensureCapture: (ref) => ensureCaptureForRecording(ref, broadcastId),
+    // 폴백은 raw start 대신 ensureCaptureForRecording를 재사용한다 — stop은 직접(멱등).
+    stopChzzkCapture: () => frameCaptureManagers.chzzk.stop(),
+    soopRefIfConnected: () => connectedProviderRefs().find((ref) => ref.provider === "soop")
+  };
 }
 
 /** 수동 녹화 종료 — 유예 타이머를 취소하고 즉시 확정한다. */
@@ -319,6 +343,8 @@ async function finalizeRecording(message: string) {
   if (ended) {
     // 녹화 종료 = 캡처 종료 (연결과 무관, start↔stop 대칭) [Q2=A]. 비참여 매니저는 이미 stopped라 멱등.
     await Promise.all(Object.values(frameCaptureManagers).map((manager) => manager.stop()));
+    // 캡처 슬롯 리셋 — 다음 방송이 스테일 슬롯을 물려받아 late-join을 잘못 차단하지 않게 한다(리스크: 스테일 슬롯).
+    activeCaptureProvider = undefined;
     // 방송 전체 채팅으로 SOOP 파일을 anchor 축으로 일괄 정렬하고 offset.json 마커를 남긴다(킬스위치 off면 생략).
     if (offsetSyncEnabled) {
       await finalizeBroadcastAlignment(ended.broadcastId, { paths: broadcastPaths }).catch((error) =>
@@ -437,28 +463,33 @@ function frameChannelIdFor(provider: ChatProvider, rawChannelId: string): string
  * 녹화 중 한 provider의 프레임 캡처를 방송 폴더로 기동하고 준비 상태를 최대 N초 대기한다.
  * record-start와 late-join(녹화 중 뒤늦게 붙는 provider) 공용. 캡처는 녹화·채팅을 게이팅하지 않으며,
  * 준비 대기는 오직 "이미지 준비 중..." → 경고/복원 상태 메시지 UX만 구동한다 [Q1=B].
+ * 반환: 기동 판정(CaptureReadiness). 스킵(broadcast 없음·비활성·이미 캡처 중·CAPTURE_SYNC off)은 undefined,
+ * 대기 중 녹화 종료는 "cancelled" — 단일 소스 폴백 판정(shouldFallbackToSoop)의 입력이 된다.
  */
-async function ensureCaptureForRecording(ref: BroadcastProviderRef, broadcastId: string | undefined) {
+async function ensureCaptureForRecording(
+  ref: BroadcastProviderRef,
+  broadcastId: string | undefined
+): Promise<CaptureReadiness | undefined> {
   if (!broadcastId) {
-    return;
+    return undefined;
   }
   const provider = ref.provider;
   const manager = frameCaptureManagers[provider];
   const frameChannelId = frameChannelIdFor(provider, ref.channelId);
   // 비활성(FRAME_CAPTURE=0)·채널 공백이면 캡처 없음.
   if (!manager.isEnabled() || !frameChannelId) {
-    return;
+    return undefined;
   }
   // 이미 캡처 중인 매니저는 재기동하지 않는다 — start()가 인덱스/assigner를 리셋해 진행 중 방송을 깨기 때문.
   // (방송 내 재접속은 매니저가 stopped=false로 유지되며 기존 백오프가 자동재개한다.)
   if (!manager.getDebugState().stopped) {
-    return;
+    return undefined;
   }
   const framesDir = broadcastPaths.frameDir(broadcastId, provider);
   // 킬스위치 off: 준비 대기·상태 UX 없이 백그라운드로만 기동(구 fire-and-forget 동작).
   if (!captureSyncEnabled) {
     void manager.start(frameChannelId, framesDir).catch(() => undefined);
-    return;
+    return undefined;
   }
   await manager.start(frameChannelId, framesDir).catch(() => undefined);
   // 연결 표시는 유지한 채 message만 "이미지 준비 중..."으로 — provider는 이미 connected다(강등 금지) [R2].
@@ -468,7 +499,7 @@ async function ensureCaptureForRecording(ref: BroadcastProviderRef, broadcastId:
   // 대기 중 녹화가 끝났으면(더블클릭 record→stop 등) 선기동한 캡처는 고아 — 정리하고 상태는 손대지 않는다 [R3].
   if (!recorder.isRecording()) {
     await manager.stop();
-    return;
+    return "cancelled";
   }
   const plan = planFromReadiness(readiness);
   const cur = state.getStatus(provider);
@@ -479,6 +510,7 @@ async function ensureCaptureForRecording(ref: BroadcastProviderRef, broadcastId:
     // 준비 완료 — 스테일 "이미지 준비 중"을 진입 전 메시지로 복원한다.
     state.setStatus({ ...cur, message: prev.message });
   }
+  return readiness;
 }
 
 const cancelledConnectResult = () => ({
@@ -539,9 +571,13 @@ async function connectProvider(request: ConnectProviderRequest) {
         channelId: adapter.getStatus().channelId ?? request.channelId,
         message: "채팅 소스 연결이 완료되었습니다."
       });
-      // 녹화 중 뒤늦게 붙은 provider면 이 방송의 캡처에 합류시킨다 (캡처는 연결이 아니라 녹화에 묶인다).
-      // 이미 캡처 중이면 ensureCaptureForRecording의 stopped guard가 no-op 처리한다.
-      if (recorder.isRecording()) {
+      // 녹화 중 뒤늦게 붙은 provider의 캡처 합류 — 단일 소스 모드에선 슬롯이 비어 있을 때만(시작 시 캡처 가능한
+      // provider가 0이었던 경우). 슬롯을 먼저 채우고 기동해 다음 late-join이 이중 기동되지 않게 한다.
+      // (레거시 모드는 슬롯을 세팅하지 않아 항상 비어 있음 → 기존 이중 캡처 그대로.)
+      if (shouldCaptureLateJoin(recorder.isRecording(), activeCaptureProvider)) {
+        if (singleFrameCaptureEnabled) {
+          activeCaptureProvider = provider;
+        }
         void ensureCaptureForRecording(
           { provider, sourceMode: request.sourceMode, channelId: adapter.getStatus().channelId ?? request.channelId ?? "" },
           recorder.getActiveBroadcastId()
